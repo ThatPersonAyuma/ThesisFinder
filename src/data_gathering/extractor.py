@@ -1,4 +1,6 @@
 # importing required classes
+from io import BytesIO
+
 from pypdf import PdfReader
 from downloader import PDF_DOWNLOAD_FOLDER
 from os import listdir
@@ -18,6 +20,27 @@ def extract_keywords(file_path: str, only_first_page: bool = True)->str:
             if ("keywords" in item 
                     or "key words" in item):
                 keywords = item
+    return keywords
+
+def extract_keywords_from_bytes(pdf_source:bytes, first_page_only:bool=True) -> str|None:
+    reader = PdfReader(BytesIO(pdf_source))
+
+    pages =  [reader.pages[0]] if first_page_only else reader.pages
+    keywords = None
+    
+    for page in pages:
+        text = page.extract_text()
+        if not text:
+            continue
+            
+        data = text.split("\n")
+        for item in data:
+            item_lower = item.lower()
+            if "keywords" in item_lower or "key words" in item_lower \
+                or "index terms" in item_lower:
+                keywords = item
+                return keywords 
+
     return keywords
 
 def extract_all():

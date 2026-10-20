@@ -13,10 +13,8 @@ def download_pdfs(links: list[str]):
             if os.path.exists(f"{PDF_DOWNLOAD_FOLDER}/{link.split('/')[-1]}.pdf"):
                 continue
             page.goto(link)
-            # Ambil URL PDF aktif (atau gunakan URL PDF tujuan)
             pdf_url = page.url
 
-            # Unduh buffer file secara langsung tanpa melalui tombol UI
             response = page.request.get(pdf_url)
             with open(f"{PDF_DOWNLOAD_FOLDER}/{link.split('/')[-1]}.pdf", "wb") as f:
                 f.write(response.body())
