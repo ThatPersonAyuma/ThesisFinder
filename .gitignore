@@ -9,4 +9,5 @@
 !/data/pdf/**
 !.gitignore
 !.gitignore.txt
+!.gitattributes
 !requirements.txt
