@@ -1,0 +1,11 @@
+# Created by venv; see https://docs.python.org/3/library/venv.html
+*
+!/src/
+!/src/data_gathering/
+!/src/data_gathering/**
+!/data/
+!/data/papers_2015_2025_keywords.parquet
+!/data/pdf/
+!/data/pdf/**
+!.gitignore
+!requirements.txt
