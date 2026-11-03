@@ -1,6 +1,5 @@
 import argparse
 import json
-import re
 import time
 from array import array
 from collections import Counter
@@ -10,93 +9,31 @@ from typing import Iterator
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-import scipy.sparse as sp
 
 from .tfidf import (DATASET_PATH, FIELD_ANALYZERS, FIELDS, INDEX_DIR, INDEX_FORMAT_VERSION,
-                    weight_matrix_data)
-
-# DATASET 
-TARGET_COLUMNS = ["id", "title", "abstract", "authors", "categories", "primary_category","published", "year", "month", "pdf", "keywords"]
-
-_ARXIV_ID_RE = re.compile(r"arxiv\.org/(?:abs|pdf)/(\d{2})(\d{2})\.\d{4,5}", re.I)
-_KW_PREFIX_RE = re.compile(r"^\s*(?:index\s*terms?|key\s*words?)\s*[:\-\u2014\u2013.\u00b7]*\s*", re.I)
-_KW_SPLIT_RE = re.compile(r"[,;\u00b7\u2022|]")
+                    row_ids_from_indptr, weight_matrix_data)
 
 
-def clean_keywords(raw) -> list[str]:
-    if raw is None or (isinstance(raw, float) and pd.isna(raw)):
-        return []
-    if isinstance(raw, (list, tuple)):
-        return [str(k).strip() for k in raw if str(k).strip()]
-    text = _KW_PREFIX_RE.sub("", str(raw), count=1)
-    items = [p.strip(" .\t\r\n") for p in _KW_SPLIT_RE.split(text)]
-    return [p for p in items if len(p) > 1]
-
-
-def _year_month_from_id(ids: pd.Series):
-    m = ids.str.extract(_ARXIV_ID_RE)
-    yy = pd.to_numeric(m[0], errors="coerce")
-    mm = pd.to_numeric(m[1], errors="coerce")
-    return (2000 + yy).astype("Int64"), mm.astype("Int64")
-
-
-def normalize_batch(df: pd.DataFrame) -> pd.DataFrame:
-    out = pd.DataFrame(index=df.index)
-    out["id"] = df["id"].astype(str)
-    out["title"] = df["title"].fillna("").astype(str)
-    out["abstract"] = df["abstract"].fillna("").astype(str)
-    out["authors"] = df["authors"].apply(lambda a: list(a) if a is not None else [])
-    out["categories"] = df["categories"].apply(lambda c: list(c) if c is not None else [])
-
-    if "primary_category" in df.columns:
-        out["primary_category"] = df["primary_category"]
-    else:
-        out["primary_category"] = out["categories"].apply(lambda c: c[0] if len(c) else None)
-
-    if "published" in df.columns:
-        out["published"] = pd.to_datetime(df["published"], errors="coerce")
-    else:
-        out["published"] = pd.NaT
-
-    id_year, id_month = _year_month_from_id(out["id"])
-    if "year" in df.columns:
-        out["year"] = df["year"].astype("Int64")
-    else:
-        out["year"] = out["published"].dt.year.astype("Int64").fillna(id_year)
-    if "month" in df.columns:
-        out["month"] = df["month"].astype("Int64")
-    else:
-        out["month"] = out["published"].dt.month.astype("Int64").fillna(id_month)
-
-    if "pdf" in df.columns:
-        out["pdf"] = df["pdf"]
-    else:
-        out["pdf"] = out["id"].str.replace("/abs/", "/pdf/", regex=False)
-
-    out["keywords"] = df["keywords"].apply(clean_keywords) if "keywords" in df.columns else [[] for _ in range(len(out))]
-    return out[TARGET_COLUMNS].reset_index(drop=True)
+READ_COLUMNS = ["id", "title", "abstract"]
 
 
 def iter_papers(path, batch_size: int = 20_000, limit: int | None = None) -> Iterator[pd.DataFrame]:
     pf = pq.ParquetFile(path)
-    available = set(pf.schema_arrow.names)
-    columns = [c for c in TARGET_COLUMNS + ["update_date"] if c in available]
+    missing = set(READ_COLUMNS) - set(pf.schema_arrow.names)
+    if missing:
+        raise ValueError(f"Kolom wajib tidak ada di dataset: {sorted(missing)}")
     seen = 0
-    for batch in pf.iter_batches(batch_size=batch_size, columns=columns):
+    for batch in pf.iter_batches(batch_size=batch_size, columns=READ_COLUMNS):
         df = batch.to_pandas()
         if limit is not None and seen + len(df) > limit:
             df = df.iloc[: limit - seen]
-        yield normalize_batch(df)
+        df["id"] = df["id"].astype(str)
+        df["title"] = df["title"].fillna("").astype(str)
+        df["abstract"] = df["abstract"].fillna("").astype(str)
+        yield df.reset_index(drop=True)
         seen += len(df)
         if limit is not None and seen >= limit:
             break
-
-
-# PEMBANGUN INDEKS 
-def _field_text(df: pd.DataFrame, field: str) -> list[str]:
-    if field in ("authors", "keywords"):
-        return [" ".join(v) for v in df[field]]
-    return df[field].tolist()
 
 
 def build_index(batches, out_dir=INDEX_DIR, fields=FIELDS, verbose: bool = True) -> dict:
@@ -114,7 +51,7 @@ def build_index(batches, out_dir=INDEX_DIR, fields=FIELDS, verbose: bool = True)
         for f in fields:
             analyzer = FIELD_ANALYZERS[f]
             b = buf[f]
-            for text in _field_text(batch, f):
+            for text in batch[f].tolist():
                 for term, c in Counter(analyzer(text)).items():
                     tid = vocab.get(term)
                     if tid is None:
@@ -122,7 +59,7 @@ def build_index(batches, out_dir=INDEX_DIR, fields=FIELDS, verbose: bool = True)
                     b["indices"].append(tid)
                     b["counts"].append(c)
                 b["indptr"].append(len(b["indices"]))
-        meta_parts.append(batch.drop(columns=["abstract"]))
+        meta_parts.append(batch[["id", "title"]])
         n_docs += len(batch)
         if verbose:
             print(f"  diproses {n_docs:,} dokumen | vocab {len(vocab):,} | {time.time() - t0:.0f}s", flush=True)
@@ -135,19 +72,24 @@ def build_index(batches, out_dir=INDEX_DIR, fields=FIELDS, verbose: bool = True)
         counts = np.frombuffer(b["counts"], dtype=np.int32)
         indptr = np.frombuffer(b["indptr"], dtype=np.int64)
         data, idf, n_nonempty = weight_matrix_data(indices, counts, indptr, n_terms)
-        csr = sp.csr_matrix((data.astype(np.float32), indices, indptr), shape=(n_docs, n_terms))
-        csc = csr.tocsc()
-        sp.save_npz(out_dir / f"tfidf_{f}.npz", csc, compressed=False)
+        
+        pd.DataFrame({
+            "doc": row_ids_from_indptr(indptr).astype(np.int32),
+            "term": indices.astype(np.int32),
+            "w": data.astype(np.float32),
+        }).to_parquet(out_dir / f"docvec_{f}.parquet", engine="pyarrow", index=False)
         np.save(out_dir / f"idf_{f}.npy", idf.astype(np.float32))
-        field_stats[f] = {"docs_nonempty": n_nonempty, "nnz": int(csc.nnz)}
+        np.save(out_dir / f"df_{f}.npy", np.bincount(indices, minlength=n_terms).astype(np.int32))
+        field_stats[f] = {"docs_nonempty": n_nonempty, "nnz": int(len(data))}
         if verbose:
-            print(f"  field '{f}': {n_nonempty:,} dokumen terisi, {csc.nnz:,} nilai non-nol", flush=True)
-        del indices, counts, indptr, data, csr, csc
+            print(f"  field '{f}': {n_nonempty:,} dokumen terisi, {len(data):,} nilai non-nol", flush=True)
+        del indices, counts, indptr, data
 
     ids_terms = [None] * n_terms
     for term, tid in vocab.items():
         ids_terms[tid] = term
     (out_dir / "vocab.json").write_text(json.dumps(ids_terms), encoding="utf-8")
+    # meta: urutan baris = nomor dokumen (doc_idx). Hanya id (kunci ke dataset) dan title (untuk tampilan).
     pd.concat(meta_parts, ignore_index=True).to_parquet(out_dir / "meta.parquet", engine="pyarrow")
 
     config = {
@@ -171,9 +113,8 @@ def build_index_from_parquet(path, out_dir=INDEX_DIR, limit: int | None = None,
     return build_index(iter_papers(path, batch_size=batch_size, limit=limit), out_dir, verbose=verbose)
 
 
-#  3. CLI 
 def main():
-    ap = argparse.ArgumentParser(description="Bangun indeks TF-IDF pre-compute (VSM)")
+    ap = argparse.ArgumentParser(description="Bangun indeks TF-IDF pre-compute (VSM: title + abstract)")
     ap.add_argument("--input", default=str(DATASET_PATH), help="path dataset parquet")
     ap.add_argument("--output", default=str(INDEX_DIR), help="folder keluaran indeks")
     ap.add_argument("--limit", type=int, default=None, help="batasi jumlah dokumen (untuk uji cepat)")

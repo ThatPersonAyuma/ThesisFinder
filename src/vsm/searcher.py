@@ -19,9 +19,6 @@ class SearchResult:
     title: str
     score: float
     field_scores: dict = field(default_factory=dict)
-    year: int | None = None
-    primary_category: str | None = None
-    pdf: str | None = None
 
 
 class VSMSearcher:
@@ -29,15 +26,29 @@ class VSMSearcher:
         index_dir = Path(index_dir)
         if not (index_dir / "config.json").exists():
             raise FileNotFoundError(
-                f"Indeks belum ada di {index_dir}. Jalankan: python -m src.vsm.build_index")
+                f"Indeks belum ada di {index_dir}. Jalankan: python -m src.vsm.indexer")
         self.config = json.loads((index_dir / "config.json").read_text(encoding="utf-8"))
         terms = json.loads((index_dir / "vocab.json").read_text(encoding="utf-8"))
         self.vocab = {t: i for i, t in enumerate(terms)}
         self.n_docs = self.config["n_docs"]
         self.fields = tuple(self.config["fields"])
-        self.matrix = {f: sp.load_npz(index_dir / f"tfidf_{f}.npz").tocsc() for f in self.fields}
+        self.terms = terms
+        self.index_dir = index_dir
+        # Vektor dokumen (CSR) dari disk diubah sekali ke CSC (kolom = term) sebagai inverted index
+        # supaya query hanya menyentuh kolom term miliknya. Versi CSR-nya dibuang dari RAM.
+        self.matrix = {f: self._load_docvec(f).tocsc() for f in self.fields}
         self.idf = {f: np.load(index_dir / f"idf_{f}.npy") for f in self.fields}
         self.meta = pd.read_parquet(index_dir / "meta.parquet")
+
+    def _load_docvec(self, field: str) -> sp.csr_matrix:
+        # docvec_<field>.parquet (doc, term, w) -> matriks CSR (baris = dokumen, kolom = term)
+        d = pd.read_parquet(self.index_dir / f"docvec_{field}.parquet")
+        doc, term, w = d["doc"].to_numpy(), d["term"].to_numpy(), d["w"].to_numpy()
+        if len(doc) > 1 and (np.diff(doc) < 0).any():
+            order = np.argsort(doc, kind="stable")
+            doc, term, w = doc[order], term[order], w[order]
+        indptr = np.concatenate(([0], np.cumsum(np.bincount(doc, minlength=self.n_docs)))).astype(np.int64)
+        return sp.csr_matrix((w, term, indptr), shape=(self.n_docs, len(self.terms)))
 
     #  komponen internal 
     def _field_query(self, text: str, f: str):
@@ -99,6 +110,21 @@ class VSMSearcher:
             total[~mask] = 0.0
         return total, per_field
 
+    def doc_vector(self, doc_idx: int, field: str, top: int | None = None) -> dict:
+        # Vektor TF-IDF tersimpan milik satu dokumen pada satu field: {term: bobot}, bobot terbesar dulu.
+        # Dibaca dari docvec_<field>.parquet (field kosong -> {}).
+        if field not in self.fields:
+            raise ValueError(f"Field tidak dikenal: {field}; pilihan: {list(self.fields)}")
+        if not hasattr(self, "_docvec_csr"):
+            self._docvec_csr = {}
+        if field not in self._docvec_csr:
+            self._docvec_csr[field] = self._load_docvec(field)
+        row = self._docvec_csr[field][int(doc_idx)]
+        order = np.argsort(-row.data)
+        if top is not None:
+            order = order[:top]
+        return {self.terms[int(row.indices[j])]: float(row.data[j]) for j in order}
+
     def top_candidates(self, query, fields=None, weights=None, top_n=1000, candidates=None):
         """Top-N dokumen (doc_idx, skor) urut skor menurun; dokumen berskor 0 tidak disertakan."""
         total, _ = self.score_all(query, fields, weights, candidates)
@@ -109,7 +135,7 @@ class VSMSearcher:
 
         query  : str (dicari di semua `fields` terpilih) ATAU dict {field: teks} untuk
                  pencarian multi-field dengan query berbeda per field,
-                 mis. {"title": "graph neural network", "authors": "kipf"}.
+                 mis. {"title": "graph neural network", "abstract": "molecule"}.
         fields : daftar field yang dipakai bila query berupa str (default: semua field).
         weights: dict bobot per field (opsional; default di config.DEFAULT_FIELD_WEIGHTS).
         """
@@ -120,9 +146,7 @@ class VSMSearcher:
             row = self.meta.iloc[int(i)]
             out.append(SearchResult(
                 rank=rank, doc_idx=int(i), id=row["id"], title=row["title"], score=float(s),
-                field_scores={f: float(per_field[f][i]) for f in per_field},
-                year=None if pd.isna(row["year"]) else int(row["year"]),
-                primary_category=row["primary_category"], pdf=row["pdf"]))
+                field_scores={f: float(per_field[f][i]) for f in per_field}))
         return out
 
     @staticmethod
@@ -141,17 +165,17 @@ class VSMSearcher:
 def main():
     ap = argparse.ArgumentParser(description="Cari artikel dengan VSM (TF-IDF pre-compute)")
     ap.add_argument("query", nargs="?", default=None, help="query untuk semua field terpilih")
-    ap.add_argument("--fields", nargs="*", default=None, help="field yang dipakai (title abstract keywords authors)")
-    for f in ("title", "abstract", "keywords", "authors"):
+    ap.add_argument("--fields", nargs="*", default=None, help="field yang dipakai (title abstract)")
+    for f in ("title", "abstract"):
         ap.add_argument(f"--{f}", default=None, help=f"query khusus field {f}")
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--index", default=None, help="folder indeks (default: data/index/vsm)")
     args = ap.parse_args()
 
-    per_field = {f: getattr(args, f) for f in ("title", "abstract", "keywords", "authors") if getattr(args, f)}
+    per_field = {f: getattr(args, f) for f in ("title", "abstract") if getattr(args, f)}
     query = per_field if per_field else args.query
     if not query:
-        ap.error("isi query atau salah satu --title/--abstract/--keywords/--authors")
+        ap.error("isi query atau salah satu --title/--abstract")
 
     s = VSMSearcher(args.index) if args.index else VSMSearcher()
     t = time.perf_counter()
@@ -160,7 +184,7 @@ def main():
     print(f"{len(results)} hasil ({ms:.1f} ms)\n")
     for r in results:
         fs = " ".join(f"{k[:3]}={v:.2f}" for k, v in r.field_scores.items())
-        print(f"{r.rank:>2}. [{r.score:.3f}] {r.title}\n    {r.id} | {r.year} | {r.primary_category} | {fs}")
+        print(f"{r.rank:>2}. [{r.score:.3f}] {r.title}\n    {r.id} | {fs}")
 
 
 if __name__ == "__main__":

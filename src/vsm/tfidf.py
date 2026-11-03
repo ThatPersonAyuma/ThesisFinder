@@ -79,12 +79,10 @@ FIELD_ANALYZERS = {
 
 # RUMUS TF-IDF 
 def term_frequency(counts: np.ndarray) -> np.ndarray:
-    """Sublinear TF: 1 + ln(count). Input count harus > 0."""
     return 1.0 + np.log(counts.astype(np.float64))
 
 
 def inverse_document_frequency(df: np.ndarray, n_docs: int) -> np.ndarray:
-    """IDF smooth: ln((N+1)/(df+1)) + 1. Term dengan df == 0 diberi idf 0 (tidak ada di korpus field itu)."""
     df = df.astype(np.float64)
     idf = np.log((n_docs + 1.0) / (df + 1.0)) + 1.0
     idf[df == 0] = 0.0
@@ -92,12 +90,10 @@ def inverse_document_frequency(df: np.ndarray, n_docs: int) -> np.ndarray:
 
 
 def row_ids_from_indptr(indptr: np.ndarray) -> np.ndarray:
-    """Nomor baris untuk setiap elemen non-nol pada matriks CSR."""
     return np.repeat(np.arange(len(indptr) - 1, dtype=np.int64), np.diff(indptr))
 
 
 def l2_normalize_rows(data: np.ndarray, indptr: np.ndarray) -> np.ndarray:
-    """Bagi tiap baris dengan norma L2-nya (baris kosong dibiarkan nol). Mengembalikan array data baru."""
     n_rows = len(indptr) - 1
     rows = row_ids_from_indptr(indptr)
     sq = np.bincount(rows, weights=data.astype(np.float64) ** 2, minlength=n_rows)
