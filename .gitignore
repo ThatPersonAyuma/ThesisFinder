@@ -1,0 +1,77 @@
+
+# Python virtual environment
+/.venv/
+/venv/
+/env/
+/Lib/
+/Scripts/
+/Include/
+/pyvenv.cfg
+
+# IDE
+/.vscode/
+/.idea/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Build
+/build/
+/dist/
+*.egg-info/
+
+
+# Python virtual environment
+/.venv/
+/venv/
+/env/
+/Lib/
+/Scripts/
+/Include/
+/pyvenv.cfg
+
+# IDE
+/.vscode/
+/.idea/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Temporary files
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Build
+/build/
+/dist/
+*.egg-info/
+
+/data/index/vsm/
