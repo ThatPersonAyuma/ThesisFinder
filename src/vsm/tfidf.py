@@ -7,17 +7,14 @@ import numpy as np
 # KONFIGURASI 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
-DATASET_PATH = ROOT_DIR / "data" / "papers_2015_2025_keywords.parquet"
+DATASET_PATH = ROOT_DIR / "data" / "completed.parquet"
 INDEX_DIR = ROOT_DIR / "data" / "index" / "vsm"
 
-FIELDS = ("title", "abstract", "keywords", "authors")
+FIELDS = ("title", "abstract")
 
-# Saat pencarian bobot dinormalisasi terhadap field yang dipilih, sehingga skor akhir berada di [0, 1].
 DEFAULT_FIELD_WEIGHTS = {
     "title": 3.0,
-    "keywords": 2.0,
     "abstract": 1.0,
-    "authors": 1.0,
 }
 
 INDEX_FORMAT_VERSION = 1
@@ -35,6 +32,14 @@ that the their theirs them themselves then there these they this those through t
 was we were what when where which while who whom why will with would you your yours yourself yourselves
 however thus therefore may might must shall via using use used based within without among upon et al
 """.split())
+
+STOPWORDS_FREK = frozenset("""
+across often many due well several even towards toward yet still less become becomes becoming whether
+much since although either beyond along thereby rather cannot per around whose every least namely another
+together always though almost whereas behind already mostly latter enough hence throughout sometimes
+others done made
+""".split())
+STOPWORDS = STOPWORDS | STOPWORDS_FREK
 
 
 @lru_cache(maxsize=200_000)
@@ -65,20 +70,15 @@ def analyze_text(text: str) -> list[str]:
     return [light_stem(t) for t in tokenize(text) if t not in STOPWORDS]
 
 
-def analyze_plain(text: str) -> list[str]:
-    return tokenize(text)
-
-
 FIELD_ANALYZERS = {
     "title": analyze_text,
     "abstract": analyze_text,
-    "keywords": analyze_text,
-    "authors": analyze_plain,
 }
 
 
 # RUMUS TF-IDF 
 def term_frequency(counts: np.ndarray) -> np.ndarray:
+    """Sublinear TF: 1 + ln(count). Input count harus > 0."""
     return 1.0 + np.log(counts.astype(np.float64))
 
 

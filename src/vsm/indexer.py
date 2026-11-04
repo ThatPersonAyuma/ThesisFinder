@@ -13,7 +13,8 @@ import pyarrow.parquet as pq
 from .tfidf import (DATASET_PATH, FIELD_ANALYZERS, FIELDS, INDEX_DIR, INDEX_FORMAT_VERSION,
                     row_ids_from_indptr, weight_matrix_data)
 
-
+# Kolom dataset yang dipakai VSM. Kolom lain (authors, keywords, categories, tahun, dst.)
+# tidak dibaca; itu urusan Binary model.
 READ_COLUMNS = ["id", "title", "abstract"]
 
 
@@ -72,7 +73,9 @@ def build_index(batches, out_dir=INDEX_DIR, fields=FIELDS, verbose: bool = True)
         counts = np.frombuffer(b["counts"], dtype=np.int32)
         indptr = np.frombuffer(b["indptr"], dtype=np.int64)
         data, idf, n_nonempty = weight_matrix_data(indices, counts, indptr, n_terms)
-        
+        # Vektor TF-IDF setiap dokumen disimpan sebagai tabel parquet: satu baris = satu nilai non-nol
+        # (doc = nomor dokumen, term = nomor kata, w = bobot tf x idf yang sudah dinormalisasi L2).
+        # Nilai nol tidak disimpan. Baris diurutkan menurut doc.
         pd.DataFrame({
             "doc": row_ids_from_indptr(indptr).astype(np.int32),
             "term": indices.astype(np.int32),
