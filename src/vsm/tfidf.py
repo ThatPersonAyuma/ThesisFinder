@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-# KONFIGURASI 
+# KONFIGURASI
 ROOT_DIR = Path(__file__).resolve().parents[2]
 
 DATASET_PATH = ROOT_DIR / "data" / "completed.parquet"
@@ -20,10 +20,11 @@ DEFAULT_FIELD_WEIGHTS = {
 INDEX_FORMAT_VERSION = 1
 
 
-#  2. PRA-PEMROSESAN TEKS 
+#  2. PRA-PEMROSESAN TEKS
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
-STOPWORDS = frozenset("""
+STOPWORDS = frozenset(
+    """
 a about above after again against all also am an and any are as at be because been before being below
 between both but by can could did do does doing down during each few for from further had has have having
 he her here hers herself him himself his how i if in into is it its itself just me more most my myself no
@@ -31,14 +32,17 @@ nor not now of off on once only or other our ours ourselves out over own same sh
 that the their theirs them themselves then there these they this those through to too under until up very
 was we were what when where which while who whom why will with would you your yours yourself yourselves
 however thus therefore may might must shall via using use used based within without among upon et al
-""".split())
+""".split()
+)
 
-STOPWORDS_FREK = frozenset("""
+STOPWORDS_FREK = frozenset(
+    """
 across often many due well several even towards toward yet still less become becomes becoming whether
 much since although either beyond along thereby rather cannot per around whose every least namely another
 together always though almost whereas behind already mostly latter enough hence throughout sometimes
 others done made
-""".split())
+""".split()
+)
 STOPWORDS = STOPWORDS | STOPWORDS_FREK
 
 
@@ -76,7 +80,7 @@ FIELD_ANALYZERS = {
 }
 
 
-# RUMUS TF-IDF 
+# RUMUS TF-IDF
 def term_frequency(counts: np.ndarray) -> np.ndarray:
     """Sublinear TF: 1 + ln(count). Input count harus > 0."""
     return 1.0 + np.log(counts.astype(np.float64))
@@ -102,7 +106,9 @@ def l2_normalize_rows(data: np.ndarray, indptr: np.ndarray) -> np.ndarray:
     return data / norms[rows]
 
 
-def weight_matrix_data(indices: np.ndarray, counts: np.ndarray, indptr: np.ndarray,  n_terms: int):
+def weight_matrix_data(
+    indices: np.ndarray, counts: np.ndarray, indptr: np.ndarray, n_terms: int
+):
 
     n_rows = len(indptr) - 1
     nonempty = int(np.count_nonzero(np.diff(indptr)))
