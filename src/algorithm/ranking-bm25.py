@@ -12,7 +12,13 @@ class BM25:
 
         self.tokenized_docs = [self._tokenize(d) for d in documents]
         self.doc_length = [len(d) for d in self.tokenized_docs]
-        self.avgdl = sum(self.doc_length) / self.N
+        self.avgdl = (sum(self.doc_length) / self.N) if self.N > 0 else 0.0
+
+        # Pra-hitung nilai normalisasi panjang dokumen untuk optimasi komputasi
+        self.doc_norm = [
+            (1 - self.b + self.b * (dl / self.avgdl)) if self.avgdl > 0 else 1.0
+            for dl in self.doc_length
+        ]
 
         self.index = defaultdict(list)
         self.doc_freq = Counter()
@@ -30,33 +36,42 @@ class BM25:
         return re.findall(r"\w+", text.lower())
 
     def score(self, query, doc_id):
-        query_tokens = re.findall(r"\w+", query.lower())
-        total_score = 0
+        query_tokens = self._tokenize(query)
+        total_score = 0.0
+        norm = self.doc_norm[doc_id]
 
         for term in query_tokens:
             if term not in self.idf:
                 continue
 
-            term_idf = self.idf[term]
             tf = 0
-
             for d_id, freq in self.index.get(term, []):
                 if d_id == doc_id:
                     tf = freq
                     break
 
-            norm = 1 - self.b + self.b * (self.doc_length[doc_id] / self.avgdl)
-            tf_component = (tf * (self.k1 + 1)) / (tf * self.k1 * norm)
-            total_score += term_idf * tf_component
+            if tf > 0:
+                tf_component = (tf * (self.k1 + 1)) / (tf + self.k1 * norm)
+                total_score += self.idf[term] * tf_component
 
         return total_score
 
     def search(self, query, top_k=None):
-        lis = []
-        for doc_id in range(self.N):
-            s = self.score(query, doc_id)
-            lis.append((doc_id, s))
-        lis.sort(key=lambda x: x[1], reverse=True)
+        query_tokens = self._tokenize(query)
+        scores = defaultdict(float)
+
+        # Inverted index traversal: hanya hitung dokumen yang mengandung kata kunci
+        for term in query_tokens:
+            if term not in self.idf:
+                continue
+
+            term_idf = self.idf[term]
+            for doc_id, tf in self.index.get(term, []):
+                norm = self.doc_norm[doc_id]
+                tf_component = (tf * (self.k1 + 1)) / (tf + self.k1 * norm)
+                scores[doc_id] += term_idf * tf_component
+
+        results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         if top_k is not None:
-            return list[:top_k]
-        return lis
+            return results[:top_k]
+        return results
