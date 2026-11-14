@@ -13,6 +13,7 @@ if str(PROJECT_ROOT) not in sys.path:
 # Mengimpor BM25 dari ranking-bm25.py secara dinamis (mendukung nama file berkarakter '-')
 ranking_module = importlib.import_module("src.algorithm.ranking-bm25")
 BM25 = ranking_module.BM25
+BM25F = ranking_module.BM25F
 
 # Dataset dokumen acuan untuk pengujian Information Retrieval (IR)
 BENCHMARK_DOCS = [
@@ -135,6 +136,64 @@ class TestBM25SearchProperties(unittest.TestCase):
         self.assertEqual(bm_empty.N, 0)
         self.assertEqual(bm_empty.avgdl, 0.0)
         self.assertEqual(bm_empty.search("test"), [])
+
+
+class TestBM25FFields(unittest.TestCase):
+    """Pengujian BM25F: bobot field, normalisasi per field, dan statistik korpus."""
+
+    FIELD_DOCS = [
+        {"title": "graph neural", "abstract": "image classification"},
+        {"title": "image classification", "abstract": "graph neural"},
+    ]
+
+    def test_default_title_weight_outranks_abstract(self):
+        """Kecocokan di title harus lebih tinggi daripada di abstract dengan tf sama."""
+        bm = BM25F(self.FIELD_DOCS)
+        results = bm.search("graph")
+
+        self.assertEqual(results[0][0], 0)
+        self.assertGreater(results[0][1], results[1][1])
+
+        # Verifikasi rumus BM25F: tf~ title = 3 (bobot default), tf~ abstract = 1.
+        idf = bm.idf["graph"]
+        expected = idf * (3 * (bm.k1 + 1)) / (3 + bm.k1)
+        self.assertAlmostEqual(bm.score("graph", 0), expected, places=6)
+
+    def test_custom_field_weights(self):
+        """Bobot field yang sama harus menghasilkan skor yang sama untuk dokumen simetris."""
+        bm = BM25F(self.FIELD_DOCS, field_weights={"title": 1.0, "abstract": 1.0})
+        self.assertAlmostEqual(bm.score("graph", 0), bm.score("graph", 1), places=6)
+
+    def test_document_frequency_counts_document_once(self):
+        """df dihitung per dokumen, bukan per kemunculan term di beberapa field."""
+        docs = [
+            {"title": "graph network", "abstract": "graph learning"},
+            {"title": "network graph", "abstract": "learning"},
+            {"title": "learning", "abstract": "network"},
+        ]
+        bm = BM25F(docs)
+
+        self.assertEqual(bm.doc_freq["graph"], 2)
+        self.assertEqual(bm.doc_freq["network"], 3)
+        self.assertEqual(bm.doc_freq["learning"], 3)
+
+    def test_missing_field_is_treated_as_empty(self):
+        """Dokumen yang tidak memiliki salah satu field tetap dapat dicari."""
+        bm = BM25F([{"title": "graph"}, {"abstract": "graph"}])
+        results = bm.search("graph")
+
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(score > 0 for _, score in results))
+
+    def test_score_matches_search_result(self):
+        """Skor search() pada dokumen multi-field identik dengan score() langsung."""
+        bm = BM25F(self.FIELD_DOCS)
+        for doc_id, score in bm.search("graph neural classification"):
+            self.assertAlmostEqual(score, bm.score("graph neural classification", doc_id), places=6)
+
+    def test_bm25_alias_is_bm25f(self):
+        """Nama lama BM25 tetap tersedia dan menunjuk ke implementasi BM25F."""
+        self.assertIs(BM25, BM25F)
 
 
 class TestBM25QueryDataset(unittest.TestCase):
