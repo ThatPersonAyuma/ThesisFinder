@@ -1,19 +1,15 @@
 import csv
-import importlib
 import math
 import sys
 import unittest
 from pathlib import Path
 
-# Memastikan root project ada di sys.path agar modul src dapat diimpor
+# Memastikan root project ada di sys.path agar modul src dapat diimpor.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-# Mengimpor BM25 dari ranking-bm25.py secara dinamis (mendukung nama file berkarakter '-')
-ranking_module = importlib.import_module("src.algorithm.ranking-bm25")
-BM25 = ranking_module.BM25
-BM25F = ranking_module.BM25F
+from src.algorithm.bm25f import BM25, BM25F
 
 # Dataset dokumen acuan untuk pengujian Information Retrieval (IR)
 BENCHMARK_DOCS = [
