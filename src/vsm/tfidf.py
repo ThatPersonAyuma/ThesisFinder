@@ -63,7 +63,7 @@ def light_stem(token: str) -> str:
         return token[:-1]
     return token
 
-
+    
 def tokenize(text: str) -> list[str]:
     if not text:
         return []
