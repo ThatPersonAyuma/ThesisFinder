@@ -2,6 +2,7 @@ import argparse
 from collections import Counter
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from ..tfidf import ROOT_DIR, analyze_text
@@ -29,6 +30,19 @@ class Tokenizer:
 
     def encode(self, text: str) -> Counter:
         return Counter(self.vocab[t] for t in self.tokenize(text))
+
+    def vectorize(self, text: str, sparse: bool = False):
+        """Teks -> vektor bag-of-words (jumlah kemunculan tiap term). Panjang = len(self); posisi i = id i di vocab_clean.csv."""
+        enc = self.encode(text)
+        cols = np.fromiter(enc.keys(), dtype=np.int64, count=len(enc))
+        vals = np.fromiter(enc.values(), dtype=np.int32, count=len(enc))
+        if sparse:
+            from scipy.sparse import csr_matrix  # hanya dibutuhkan untuk mode sparse
+
+            return csr_matrix((vals, (np.zeros(len(cols), dtype=np.int64), cols)), shape=(1, len(self)))
+        vec = np.zeros(len(self), dtype=np.int32)
+        vec[cols] = vals
+        return vec
 
 
 # Membuat vocab_clean.csv (id, word, frequence) dari frek_stem.csv; id = nomor baris = id term di indeks

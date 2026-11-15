@@ -51,7 +51,8 @@ def hapus_bentuk_aneh(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # 5. Normalisasi (regex): buang tanda baca, pecah di simbol/strip, gabung frekuensi term yang sama
-TOKEN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+# # TOKEN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+TOKEN = re.compile(r"[a-z0-9]+")
 
 
 def normalisasi(df: pd.DataFrame) -> pd.DataFrame:
