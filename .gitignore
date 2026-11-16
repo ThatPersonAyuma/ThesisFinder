@@ -75,3 +75,4 @@ Thumbs.db
 *.egg-info/
 
 /data/index/vsm/
+/data/index/binary/

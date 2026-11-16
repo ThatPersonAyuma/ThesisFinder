@@ -1,0 +1,29 @@
+{
+  "id": "FEAT-003",
+  "type": "feat",
+  "description": "Create src/pipeline/ module with SearchPipeline class that orchestrates the complete filtering and search workflow. Integrate BinaryFilter (pre and post), VSMSearcher, and load dataset for metadata enrichment. Implement search method that: (1) applies pre-filters (year + primary_category) to get candidates, (2) runs VSM search with candidates, (3) applies post-filters (authors + categories) to results, (4) returns enriched results with full metadata. Add CLI with argparse for interactive searching.",
+  "status": "pending",
+  "steps": [
+    "Create src/pipeline/__init__.py exporting SearchPipeline",
+    "Create src/pipeline/search_pipeline.py with SearchPipeline class. In __init__: instantiate VSMSearcher, BinaryFilter, load dataset parquet (pd.read_parquet) for metadata access",
+    "Implement search(query, year_range=None, primary_categories=None, authors=None, all_categories=None, top_k=10) method following this sequence: (1) Call bf.get_pre_filter_candidates(year_range, primary_categories) to get candidate doc indices (or None for all docs). (2) Call vsm.search(query, candidates=candidates, top_k=top_k) to get initial results. (3) Extract doc_ids from results, apply bf.apply_post_filters(doc_ids, authors, all_categories). (4) Filter results list to only include post-filtered doc_ids. (5) Enrich each result with full metadata from dataset (id, title, abstract, authors, categories, primary_category, year). (6) Return list of dicts with metadata + score + rank fields",
+    "Add CLI using argparse: python -m src.pipeline.search_pipeline QUERY --year-min Y --year-max Y --primary-categories cat1 cat2 --authors a1 a2 --all-categories c1 c2 --top N. Format output to show rank, score, title, authors, year, categories",
+    "Handle edge cases: empty results at any stage, no filters specified (search all docs), null metadata values"
+  ],
+  "acceptance_criteria": [
+    "SearchPipeline can be instantiated and loads all required components without errors",
+    "search() with no filters returns same results as direct VSM search",
+    "search() with year_range=(2020, 2022) only returns papers from 2020-2022",
+    "search() with primary_categories=['cs.AI'] only returns papers with primary_category='cs.AI'",
+    "search() with authors=['smith'] returns papers where any author name contains 'smith' (case-insensitive)",
+    "Combining pre-filters and post-filters works correctly (intersection logic)",
+    "CLI runs successfully and displays formatted results"
+  ],
+  "verification": [
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -c \"from src.pipeline import SearchPipeline; sp = SearchPipeline(); results = sp.search('graph neural network', top_k=5); print(f'Found {len(results)} results'); print(results[0] if results else 'No results')\"",
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m src.pipeline.search_pipeline \"machine learning\" --year-min 2020 --year-max 2022 --top 5",
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest test/test_binary_model.py::TestSearchPipeline -v"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

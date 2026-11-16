@@ -1,0 +1,26 @@
+{
+  "id": "FEAT-004",
+  "type": "test",
+  "description": "Create comprehensive test suite in test/test_binary_model.py covering all binary model components: indexer correctness (multi-value fields, null handling), filter logic (pre and post, AND/OR operations, case-insensitivity), BM25F candidates parameter, and full pipeline integration. Follow the pattern in test/test_vsm.py using unittest.TestCase with pytest runner.",
+  "status": "pending",
+  "steps": [
+    "Create test/test_binary_model.py with unittest imports and test fixtures. Create small test dataset (10-20 papers) with known year, primary_category, authors, categories values including nulls and multi-value fields",
+    "Implement TestBinaryIndexer class: test index building creates correct parquet files, test authors index has multiple entries per multi-author paper, test null values are excluded from year and primary_category indexes, test config.json contains correct stats",
+    "Implement TestBinaryFilter class: test filter_by_year with ranges and edge cases (min=max, no matches), test filter_by_primary_category OR logic with single and multiple categories, test get_pre_filter_candidates AND logic (intersection), test filter_by_authors with case-insensitive exact match and partial name matching, test filter_by_categories ANY logic, test apply_post_filters sequential application, test empty results handling",
+    "Implement TestBM25FWithCandidates class: test search without candidates (backward compatibility), test search with list candidates filters correctly, test search with numpy array candidates, test empty candidates returns empty results, test candidates with non-existent doc_ids",
+    "Implement TestSearchPipeline class: test search with no filters, test search with only pre-filters, test search with only post-filters, test search combining all filters, test empty results at each stage, test metadata enrichment includes all expected fields, test year/primary_category null values in results are handled"
+  ],
+  "acceptance_criteria": [
+    "All test classes run successfully with pytest",
+    "Test coverage includes edge cases: empty results, nulls, case sensitivity, multi-value fields",
+    "Tests verify correct AND logic for pre-filters (intersection) and OR logic within each filter type",
+    "Tests confirm backward compatibility of BM25F changes",
+    "Integration test confirms full pipeline workflow from query to enriched results"
+  ],
+  "verification": [
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest test/test_binary_model.py -v",
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest test/ -v"
+  ],
+  "blocked_reason": null,
+  "findings": ""
+}

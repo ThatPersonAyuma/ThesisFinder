@@ -1,0 +1,7 @@
+{
+  "task_id": "task-binary-model",
+  "task_description": "Implement Binary Model (metadata filtering system) for year, primary_category, authors, and categories filtering on top of existing VSM and BM25F search engines",
+  "status": "pending",
+  "feature_order": ["FEAT-001", "FEAT-002", "FEAT-003", "FEAT-004"],
+  "blocked_reason": null
+}
