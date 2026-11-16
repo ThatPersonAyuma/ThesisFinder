@@ -144,10 +144,25 @@ class BM25F:
 
         return total_score
 
-    def search(self, query, top_k=None):
-        """Kembalikan [(doc_id, skor)] terurut menurun; skor 0 tidak disertakan."""
+    def search(self, query, top_k=None, candidates=None):
+        """Kembalikan [(doc_id, skor)] terurut menurun; skor 0 tidak disertakan.
+        
+        Args:
+            query (str): Query string untuk dicari.
+            top_k (int, optional): Batasi hasil ke K teratas. Jika None, kembalikan semua.
+            candidates (list/np.ndarray, optional): Subset indeks dokumen yang akan diskor.
+                Jika diberikan, hanya dokumen dalam list ini yang akan diperingkat.
+                Berguna untuk pre-filtering (misal: filter tahun, kategori, dll).
+                Jika None, semua dokumen akan diskor.
+        
+        Returns:
+            list: List of (doc_id, score) tuples, sorted by score descending.
+        """
         query_tokens = self._tokenize(query)
         scores = defaultdict(float)
+
+        # Konversi candidates ke set untuk O(1) lookup jika disediakan.
+        candidates_set = set(candidates) if candidates is not None else None
 
         # Traversal inverted index: hanya hitung dokumen yang memuat term query.
         for term in query_tokens:
@@ -157,6 +172,9 @@ class BM25F:
 
             term_idf = self.idf[term]
             for doc_id, field_tfs in postings.items():
+                # Filter berdasarkan candidates jika disediakan.
+                if candidates_set is not None and doc_id not in candidates_set:
+                    continue
                 scores[doc_id] += self._term_score(term_idf, doc_id, field_tfs)
 
         results = sorted(
