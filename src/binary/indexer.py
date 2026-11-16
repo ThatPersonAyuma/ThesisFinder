@@ -159,7 +159,7 @@ class BinaryIndexer:
     def _build_authors_index(self, df: pd.DataFrame, verbose: bool):
         """
         Build inverted index untuk field authors.
-        Authors adalah numpy array - setiap author dalam array diindeks terpisah.
+        Authors adalah numpy array atau list - setiap author dalam array/list diindeks terpisah.
         Normalisasi: lowercase untuk case-insensitive matching.
         """
         if verbose:
@@ -170,8 +170,8 @@ class BinaryIndexer:
         docs_with_authors = 0
         
         for doc_idx, authors_array in enumerate(df["authors"]):
-            # authors_array adalah numpy array
-            if authors_array is not None and isinstance(authors_array, np.ndarray) and len(authors_array) > 0:
+            # authors_array bisa numpy array atau list
+            if authors_array is not None and (isinstance(authors_array, (np.ndarray, list))) and len(authors_array) > 0:
                 docs_with_authors += 1
                 for author in authors_array:
                     # Normalize: lowercase
@@ -201,7 +201,7 @@ class BinaryIndexer:
     def _build_categories_index(self, df: pd.DataFrame, verbose: bool):
         """
         Build inverted index untuk field categories.
-        Categories adalah numpy array - setiap category dalam array diindeks terpisah.
+        Categories adalah numpy array atau list - setiap category dalam array/list diindeks terpisah.
         Normalisasi: lowercase untuk case-insensitive matching.
         """
         if verbose:
@@ -212,8 +212,8 @@ class BinaryIndexer:
         docs_with_categories = 0
         
         for doc_idx, categories_array in enumerate(df["categories"]):
-            # categories_array adalah numpy array
-            if categories_array is not None and isinstance(categories_array, np.ndarray) and len(categories_array) > 0:
+            # categories_array bisa numpy array atau list
+            if categories_array is not None and isinstance(categories_array, (np.ndarray, list)) and len(categories_array) > 0:
                 docs_with_categories += 1
                 for category in categories_array:
                     # Normalize: lowercase

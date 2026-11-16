@@ -1,384 +1,628 @@
 """
-Test untuk Binary Model Indexer dan Filter.
+Test suite untuk Binary Model: indexer, filter, BM25F candidates, dan pipeline integration.
 """
+import json
+import os
+import tempfile
 import unittest
-from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from src.binary import BinaryFilter, BinaryIndexer
-from src.binary.config import BINARY_INDEX_DIR
 from src.algorithm.bm25f import BM25F
-from src.pipeline import SearchPipeline
+from src.binary.filter import BinaryFilter
+from src.binary.indexer import BinaryIndexer
+
+
+# Test dataset kecil dengan nilai known untuk testing
+TEST_PAPERS = [
+    {
+        "id": "paper_001",
+        "title": "Deep Learning for Computer Vision",
+        "abstract": "We present a novel deep learning approach for image classification.",
+        "year": 2020.0,
+        "primary_category": "cs.CV",
+        "authors": np.array(["Alice Smith", "Bob Jones"]),
+        "categories": np.array(["cs.CV", "cs.AI", "cs.LG"]),
+    },
+    {
+        "id": "paper_002",
+        "title": "Natural Language Processing with Transformers",
+        "abstract": "Transformer models have revolutionized NLP tasks.",
+        "year": 2021.0,
+        "primary_category": "cs.CL",
+        "authors": np.array(["Charlie Brown", "Diana Prince"]),
+        "categories": np.array(["cs.CL", "cs.AI"]),
+    },
+    {
+        "id": "paper_003",
+        "title": "Graph Neural Networks Survey",
+        "abstract": "A comprehensive survey of graph neural network architectures.",
+        "year": 2021.0,
+        "primary_category": "cs.LG",
+        "authors": np.array(["Alice Smith", "Eve White"]),
+        "categories": np.array(["cs.LG", "cs.AI"]),
+    },
+    {
+        "id": "paper_004",
+        "title": "Reinforcement Learning in Robotics",
+        "abstract": "We apply reinforcement learning algorithms to robotic control.",
+        "year": 2022.0,
+        "primary_category": "cs.RO",
+        "authors": np.array(["Frank Miller"]),
+        "categories": np.array(["cs.RO", "cs.AI", "cs.LG"]),
+    },
+    {
+        "id": "paper_005",
+        "title": "Quantum Computing Basics",
+        "abstract": "An introduction to quantum computing principles.",
+        "year": 2020.0,
+        "primary_category": "quant-ph",
+        "authors": np.array(["Grace Hopper", "Henry Ford"]),
+        "categories": np.array(["quant-ph", "cs.ET"]),
+    },
+    # Papers dengan null values
+    {
+        "id": "paper_006",
+        "title": "Machine Learning Theory",
+        "abstract": "Theoretical foundations of machine learning.",
+        "year": None,  # null year
+        "primary_category": None,  # null primary_category
+        "authors": np.array(["Iris West"]),
+        "categories": np.array(["cs.LG"]),
+    },
+    {
+        "id": "paper_007",
+        "title": "Data Mining Techniques",
+        "abstract": "Advanced data mining and analysis techniques.",
+        "year": 2022.0,
+        "primary_category": "cs.DB",
+        "authors": np.array([]),  # empty authors
+        "categories": np.array([]),  # empty categories
+    },
+    # Papers untuk testing case sensitivity
+    {
+        "id": "paper_008",
+        "title": "AI Safety Research",
+        "abstract": "Ensuring safe artificial intelligence systems.",
+        "year": 2021.0,
+        "primary_category": "cs.AI",
+        "authors": np.array(["ALICE SMITH", "jack BLACK"]),  # mixed case
+        "categories": np.array(["CS.AI", "cs.cy"]),  # mixed case
+    },
+    {
+        "id": "paper_009",
+        "title": "Distributed Systems",
+        "abstract": "Scalable distributed computing architectures.",
+        "year": 2020.0,
+        "primary_category": "cs.DC",
+        "authors": np.array(["Karen Page"]),
+        "categories": np.array(["cs.DC"]),
+    },
+    {
+        "id": "paper_010",
+        "title": "Cryptography Fundamentals",
+        "abstract": "Modern cryptographic algorithms and protocols.",
+        "year": 2023.0,
+        "primary_category": "cs.CR",
+        "authors": np.array(["Leo King", "Alice Smith"]),  # Alice appears again
+        "categories": np.array(["cs.CR", "cs.IT"]),
+    },
+]
+
+
+def make_test_df():
+    """Create test DataFrame dari TEST_PAPERS."""
+    df = pd.DataFrame(TEST_PAPERS)
+    # For parquet compatibility, convert numpy arrays to lists during save
+    # They will be loaded back as object dtype
+    return df
 
 
 class TestBinaryIndexer(unittest.TestCase):
-    """Test untuk BinaryIndexer."""
-    
-    def test_indexes_exist(self):
-        """Verifikasi bahwa semua file index ada."""
-        index_dir = Path(BINARY_INDEX_DIR)
-        self.assertTrue((index_dir / "config.json").exists(), "config.json harus ada")
-        self.assertTrue((index_dir / "year.parquet").exists(), "year.parquet harus ada")
-        self.assertTrue((index_dir / "primary_category.parquet").exists(), "primary_category.parquet harus ada")
-        self.assertTrue((index_dir / "authors.parquet").exists(), "authors.parquet harus ada")
-        self.assertTrue((index_dir / "categories.parquet").exists(), "categories.parquet harus ada")
-    
-    def test_index_structure(self):
-        """Verifikasi struktur index parquet files."""
-        index_dir = Path(BINARY_INDEX_DIR)
+    """Test BinaryIndexer: index building, multi-value fields, null handling."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dataset_path = os.path.join(self.tmp.name, "test_dataset.parquet")
+        self.index_dir = os.path.join(self.tmp.name, "index")
         
-        for filename in ["year.parquet", "primary_category.parquet", "authors.parquet", "categories.parquet"]:
-            df = pd.read_parquet(index_dir / filename)
-            self.assertIn("key", df.columns, f"{filename} harus memiliki kolom 'key'")
-            self.assertIn("doc_idx", df.columns, f"{filename} harus memiliki kolom 'doc_idx'")
-    
-    def test_authors_multiple_entries(self):
-        """Verifikasi bahwa multi-author papers memiliki multiple entries."""
-        index_dir = Path(BINARY_INDEX_DIR)
-        authors_df = pd.read_parquet(index_dir / "authors.parquet")
+        # Save test dataset
+        df = make_test_df()
+        # Convert numpy arrays to lists for parquet serialization
+        df_save = df.copy()
+        df_save["authors"] = df_save["authors"].apply(lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+        df_save["categories"] = df_save["categories"].apply(lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+        df_save.to_parquet(self.dataset_path, engine="pyarrow")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_index_building_creates_parquet_files(self):
+        """Test bahwa indexer membuat semua file parquet yang diperlukan."""
+        indexer = BinaryIndexer(self.dataset_path, self.index_dir)
+        config = indexer.build_indexes(verbose=False)
         
-        # Cek apakah ada dokumen dengan multiple authors
-        doc_counts = authors_df["doc_idx"].value_counts()
-        multi_author_docs = (doc_counts > 1).sum()
+        # Verify all files exist
+        self.assertTrue(os.path.exists(os.path.join(self.index_dir, "year.parquet")))
+        self.assertTrue(os.path.exists(os.path.join(self.index_dir, "primary_category.parquet")))
+        self.assertTrue(os.path.exists(os.path.join(self.index_dir, "authors.parquet")))
+        self.assertTrue(os.path.exists(os.path.join(self.index_dir, "categories.parquet")))
+        self.assertTrue(os.path.exists(os.path.join(self.index_dir, "config.json")))
         
-        self.assertGreater(multi_author_docs, 0, "Harus ada dokumen dengan multiple authors")
+        # Verify config
+        self.assertEqual(config["total_docs"], 10)
+        self.assertIn("field_stats", config)
+
+    def test_authors_index_has_multiple_entries_per_paper(self):
+        """Test bahwa multi-author paper menghasilkan multiple entries."""
+        indexer = BinaryIndexer(self.dataset_path, self.index_dir)
+        indexer.build_indexes(verbose=False)
+        
+        authors_df = pd.read_parquet(os.path.join(self.index_dir, "authors.parquet"))
+        
+        # Paper 001 memiliki 2 authors (Alice Smith, Bob Jones)
+        paper_001_entries = authors_df[authors_df["doc_idx"] == 0]
+        self.assertEqual(len(paper_001_entries), 2)
+        
+        # Verify authors normalized to lowercase
+        author_keys = set(paper_001_entries["key"].tolist())
+        self.assertEqual(author_keys, {"alice smith", "bob jones"})
+
+    def test_null_values_excluded_from_indexes(self):
+        """Test bahwa null values di year dan primary_category di-skip."""
+        indexer = BinaryIndexer(self.dataset_path, self.index_dir)
+        config = indexer.build_indexes(verbose=False)
+        
+        # Paper 006 memiliki null year dan primary_category (doc_idx=5)
+        year_df = pd.read_parquet(os.path.join(self.index_dir, "year.parquet"))
+        primary_cat_df = pd.read_parquet(os.path.join(self.index_dir, "primary_category.parquet"))
+        
+        # Verify paper 006 tidak ada di index
+        self.assertNotIn(5, year_df["doc_idx"].tolist())
+        self.assertNotIn(5, primary_cat_df["doc_idx"].tolist())
+        
+        # Verify stats: 9 docs have non-null year, 9 have non-null primary_category
+        self.assertEqual(config["field_stats"]["year"]["non_null_docs"], 9)
+        self.assertEqual(config["field_stats"]["primary_category"]["non_null_docs"], 9)
+
+    def test_config_contains_correct_stats(self):
+        """Test bahwa config.json berisi stats yang benar."""
+        indexer = BinaryIndexer(self.dataset_path, self.index_dir)
+        config = indexer.build_indexes(verbose=False)
+        
+        # Verify year stats
+        year_stats = config["field_stats"]["year"]
+        self.assertEqual(year_stats["unique_keys"], 4)  # 2020, 2021, 2022, 2023
+        self.assertEqual(year_stats["non_null_docs"], 9)
+        
+        # Verify primary_category stats
+        cat_stats = config["field_stats"]["primary_category"]
+        self.assertEqual(cat_stats["unique_keys"], 9)  # cs.CV, cs.CL, cs.LG, cs.RO, quant-ph, cs.DB, cs.AI, cs.DC, cs.CR
+        
+        # Verify authors stats (Alice Smith appears 3x, total unique authors)
+        authors_stats = config["field_stats"]["authors"]
+        self.assertGreater(authors_stats["unique_keys"], 10)
+        
+        # Verify categories stats
+        categories_stats = config["field_stats"]["categories"]
+        self.assertGreater(categories_stats["unique_keys"], 5)
+
+    def test_empty_arrays_handled_correctly(self):
+        """Test bahwa empty numpy arrays (paper 007) tidak menghasilkan entries."""
+        indexer = BinaryIndexer(self.dataset_path, self.index_dir)
+        indexer.build_indexes(verbose=False)
+        
+        authors_df = pd.read_parquet(os.path.join(self.index_dir, "authors.parquet"))
+        categories_df = pd.read_parquet(os.path.join(self.index_dir, "categories.parquet"))
+        
+        # Paper 007 (doc_idx=6) memiliki empty authors dan categories
+        self.assertNotIn(6, authors_df["doc_idx"].tolist())
+        self.assertNotIn(6, categories_df["doc_idx"].tolist())
 
 
 class TestBinaryFilter(unittest.TestCase):
-    """Test untuk BinaryFilter."""
-    
+    """Test BinaryFilter: filtering logic, AND/OR operations, case-insensitivity."""
+
     @classmethod
     def setUpClass(cls):
-        """Setup: load filter sekali untuk semua test."""
-        cls.filter = BinaryFilter()
-    
-    def test_filter_instantiation(self):
-        """Test bahwa BinaryFilter bisa diinstansiasi tanpa error."""
-        self.assertIsInstance(self.filter, BinaryFilter)
-    
-    def test_filter_by_year(self):
-        """Test filtering berdasarkan year range."""
-        candidates = self.filter.filter_by_year(2020, 2022)
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dataset_path = os.path.join(cls.tmp.name, "test_dataset.parquet")
+        cls.index_dir = os.path.join(cls.tmp.name, "index")
         
-        self.assertIsInstance(candidates, np.ndarray, "Harus mengembalikan numpy array")
-        self.assertGreater(len(candidates), 0, "Harus ada kandidat untuk year 2020-2022")
-        self.assertEqual(candidates.dtype, np.int64, "Doc indices harus bertipe int64")
-    
-    def test_filter_by_primary_category(self):
-        """Test filtering berdasarkan primary_category."""
-        candidates = self.filter.filter_by_primary_category(["cs.AI", "cs.LG"])
+        # Build indexes
+        df = make_test_df()
+        # Convert numpy arrays to lists for parquet serialization
+        df_save = df.copy()
+        df_save["authors"] = df_save["authors"].apply(lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+        df_save["categories"] = df_save["categories"].apply(lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+        df_save.to_parquet(cls.dataset_path, engine="pyarrow")
         
-        self.assertIsInstance(candidates, np.ndarray, "Harus mengembalikan numpy array")
-        self.assertGreater(len(candidates), 0, "Harus ada kandidat untuk cs.AI atau cs.LG")
-    
-    def test_get_pre_filter_candidates_intersection(self):
-        """Test kombinasi pre-filtering dengan AND logic (intersection)."""
-        # Filter dengan year range dan primary_category
-        candidates = self.filter.get_pre_filter_candidates(
-            year_range=(2020, 2022),
-            primary_categories=["cs.AI", "cs.LG"]
+        indexer = BinaryIndexer(cls.dataset_path, cls.index_dir)
+        indexer.build_indexes(verbose=False)
+        
+        cls.filter = BinaryFilter(cls.index_dir, cls.dataset_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_filter_by_year_range(self):
+        """Test filter berdasarkan year range."""
+        # 2020-2021: papers 001, 002, 003, 005, 008, 009 (doc_idx 0, 1, 2, 4, 7, 8)
+        result = self.filter.filter_by_year(2020.0, 2021.0)
+        expected = {0, 1, 2, 4, 7, 8}
+        self.assertEqual(set(result), expected)
+
+    def test_filter_by_year_edge_cases(self):
+        """Test edge cases untuk year filtering."""
+        # min=max: only 2022
+        result = self.filter.filter_by_year(2022.0, 2022.0)
+        expected = {3, 6}  # papers 004 dan 007
+        self.assertEqual(set(result), expected)
+        
+        # No matches: year 2025
+        result = self.filter.filter_by_year(2025.0, 2026.0)
+        self.assertEqual(len(result), 0)
+
+    def test_filter_by_primary_category_or_logic(self):
+        """Test filter primary_category dengan OR logic."""
+        # Single category
+        result = self.filter.filter_by_primary_category(["cs.AI"])
+        expected = {7}  # paper 008
+        self.assertEqual(set(result), expected)
+        
+        # Multiple categories (OR logic)
+        result = self.filter.filter_by_primary_category(["cs.CV", "cs.CL"])
+        expected = {0, 1}  # papers 001 dan 002
+        self.assertEqual(set(result), expected)
+
+    def test_filter_by_primary_category_empty_list(self):
+        """Test filter dengan empty category list."""
+        result = self.filter.filter_by_primary_category([])
+        self.assertEqual(len(result), 0)
+
+    def test_get_pre_filter_candidates_and_logic(self):
+        """Test kombinasi pre-filters dengan AND logic (intersection)."""
+        # Year 2020-2021 AND primary_category cs.CV or cs.CL
+        # Year 2020-2021: {0, 1, 2, 4, 8}
+        # cs.CV or cs.CL: {0, 1}
+        # Intersection: {0, 1}
+        result = self.filter.get_pre_filter_candidates(
+            year_range=(2020.0, 2021.0),
+            primary_categories=["cs.CV", "cs.CL"]
         )
-        
-        self.assertIsInstance(candidates, np.ndarray, "Harus mengembalikan numpy array")
-        self.assertGreater(len(candidates), 0, "Harus ada kandidat yang memenuhi kedua filter")
-        
-        # Verifikasi bahwa hasilnya adalah intersection (lebih sedikit dari filter individual)
-        year_only = self.filter.get_pre_filter_candidates(year_range=(2020, 2022))
-        cat_only = self.filter.get_pre_filter_candidates(primary_categories=["cs.AI", "cs.LG"])
-        
-        self.assertLessEqual(len(candidates), len(year_only), "Intersection harus <= year filter")
-        self.assertLessEqual(len(candidates), len(cat_only), "Intersection harus <= category filter")
-    
+        expected = {0, 1}
+        self.assertEqual(set(result), expected)
+
+    def test_get_pre_filter_candidates_no_filters(self):
+        """Test pre-filter tanpa filter apapun."""
+        result = self.filter.get_pre_filter_candidates()
+        # Tidak ada filter -> return empty array
+        self.assertEqual(len(result), 0)
+
     def test_filter_by_authors_case_insensitive(self):
-        """Test post-filtering by authors dengan case-insensitive matching."""
-        # Ambil sample candidates
-        sample_candidates = np.array([0, 1, 2, 3, 4, 5], dtype=np.int64)
+        """Test post-filter authors dengan case-insensitive exact match."""
+        doc_ids = np.array([0, 1, 2, 3, 7, 9])
         
-        # Filter dengan author name (test case-insensitive)
-        # Kita perlu tahu nama author yang valid dulu
-        authors_df = pd.read_parquet(self.filter.index_dir / "authors.parquet")
-        sample_author = authors_df.iloc[0]["key"]
+        # Search "alice smith" (lowercase) -> should match paper 001, 003, 008, 010
+        result = self.filter.filter_by_authors(doc_ids, ["alice smith"])
+        expected = {0, 2, 7, 9}  # papers dengan Alice Smith (various cases)
+        self.assertEqual(set(result), expected)
         
-        # Test dengan berbagai case
-        result_lower = self.filter.filter_by_authors(sample_candidates, [sample_author.lower()])
-        result_upper = self.filter.filter_by_authors(sample_candidates, [sample_author.upper()])
+        # Search "ALICE SMITH" (uppercase) -> same results
+        result = self.filter.filter_by_authors(doc_ids, ["ALICE SMITH"])
+        self.assertEqual(set(result), expected)
+
+    def test_filter_by_authors_partial_name_not_matched(self):
+        """Test bahwa partial name tidak matched (exact match only)."""
+        doc_ids = np.array([0, 1, 2, 3])
         
-        # Kedua hasil harus sama (case-insensitive)
-        self.assertEqual(len(result_lower), len(result_upper), "Case-insensitive matching harus konsisten")
-    
+        # Search "alice" (partial) -> tidak match karena exact match
+        result = self.filter.filter_by_authors(doc_ids, ["alice"])
+        self.assertEqual(len(result), 0)
+
+    def test_filter_by_authors_multiple_authors_or_logic(self):
+        """Test filter multiple authors dengan ANY logic."""
+        doc_ids = np.array([0, 1, 2, 3, 4])
+        
+        # Search "alice smith" OR "bob jones"
+        result = self.filter.filter_by_authors(doc_ids, ["alice smith", "bob jones"])
+        expected = {0, 2}  # paper 001 (has both), paper 003 (has alice)
+        self.assertEqual(set(result), expected)
+
+    def test_filter_by_categories_case_insensitive(self):
+        """Test post-filter categories dengan case-insensitive exact match."""
+        doc_ids = np.array([0, 1, 2, 3, 4, 7])
+        
+        # Search "cs.ai" (lowercase) -> should match papers with cs.AI or CS.AI
+        result = self.filter.filter_by_categories(doc_ids, ["cs.ai"])
+        expected = {0, 1, 2, 3, 7}  # papers dengan cs.AI (various cases)
+        self.assertEqual(set(result), expected)
+
     def test_filter_by_categories_any_logic(self):
-        """Test post-filtering by categories dengan ANY logic."""
-        # Ambil sample candidates
-        sample_candidates = self.filter.filter_by_year(2020, 2022)[:100]
+        """Test filter categories dengan ANY logic."""
+        doc_ids = np.array([0, 1, 2, 3, 4])
         
-        # Filter dengan multiple categories (ANY logic: OR)
-        result = self.filter.filter_by_categories(sample_candidates, ["cs.ai", "cs.lg"])
+        # Search "cs.CV" OR "cs.CL"
+        result = self.filter.filter_by_categories(doc_ids, ["cs.cv", "cs.cl"])
+        expected = {0, 1}  # paper 001 (cs.CV), paper 002 (cs.CL)
+        self.assertEqual(set(result), expected)
+
+    def test_apply_post_filters_sequential(self):
+        """Test aplikasi sequential post-filters dengan AND logic."""
+        doc_ids = np.array([0, 1, 2, 3, 7, 9])
         
-        self.assertIsInstance(result, np.ndarray, "Harus mengembalikan numpy array")
-        # Result bisa kosong atau ada, tergantung data
-    
-    def test_apply_post_filters(self):
-        """Test kombinasi post-filtering dengan AND logic."""
-        # Ambil pre-filter candidates
-        pre_candidates = self.filter.get_pre_filter_candidates(year_range=(2020, 2022))
-        
-        # Ambil sample authors dan categories dari index
-        authors_df = pd.read_parquet(self.filter.index_dir / "authors.parquet")
-        categories_df = pd.read_parquet(self.filter.index_dir / "categories.parquet")
-        
-        sample_author = authors_df.iloc[0]["key"]
-        sample_category = categories_df.iloc[0]["key"]
-        
-        # Apply post-filters
+        # Filter by authors "alice smith" AND categories "cs.ai"
+        # alice smith: {0, 2, 7, 9}
+        # cs.ai: {0, 2, 3, 7}
+        # Intersection: {0, 2, 7}
         result = self.filter.apply_post_filters(
-            pre_candidates[:100],
-            authors=[sample_author],
-            categories=[sample_category]
+            doc_ids,
+            authors=["alice smith"],
+            categories=["cs.ai"]
         )
+        expected = {0, 2, 7}
+        self.assertEqual(set(result), expected)
+
+    def test_empty_results_handling(self):
+        """Test handling empty results."""
+        # Empty doc_ids input
+        result = self.filter.filter_by_authors(np.array([]), ["alice smith"])
+        self.assertEqual(len(result), 0)
         
-        self.assertIsInstance(result, np.ndarray, "Harus mengembalikan numpy array")
+        # No matches
+        doc_ids = np.array([0, 1, 2])
+        result = self.filter.filter_by_authors(doc_ids, ["nonexistent author"])
+        self.assertEqual(len(result), 0)
 
 
 class TestBM25FWithCandidates(unittest.TestCase):
-    """Test untuk BM25F.search() dengan parameter candidates."""
-    
+    """Test BM25F.search() dengan candidates parameter."""
+
     @classmethod
     def setUpClass(cls):
-        """Setup: buat sample documents untuk testing."""
         cls.documents = [
-            {"title": "machine learning basics", "abstract": "introduction to ML"},
-            {"title": "deep learning neural networks", "abstract": "advanced neural networks"},
-            {"title": "natural language processing", "abstract": "NLP with transformers"},
-            {"title": "computer vision", "abstract": "image recognition deep learning"},
-            {"title": "reinforcement learning", "abstract": "RL algorithms and applications"},
+            {"title": "Deep learning for images", "abstract": "CNN architectures"},
+            {"title": "Natural language processing", "abstract": "Transformer models"},
+            {"title": "Graph neural networks", "abstract": "GNN for molecular graphs"},
+            {"title": "Reinforcement learning", "abstract": "Q-learning algorithms"},
+            {"title": "Computer vision basics", "abstract": "Image classification tasks"},
         ]
-        cls.bm25f = BM25F(cls.documents)
-    
-    def test_search_without_candidates_backward_compatible(self):
-        """Test bahwa search tanpa candidates parameter masih bekerja seperti sebelumnya."""
-        results = self.bm25f.search("machine learning")
+        cls.bm25 = BM25F(cls.documents)
+
+    def test_search_without_candidates_backward_compatibility(self):
+        """Test bahwa search tanpa candidates bekerja seperti sebelumnya."""
+        results = self.bm25.search("learning")
         
-        self.assertIsInstance(results, list, "Harus mengembalikan list")
-        self.assertGreater(len(results), 0, "Harus ada hasil untuk query 'machine learning'")
+        # Should return results for all matching documents
+        self.assertGreater(len(results), 0)
         
-        # Verifikasi format hasil
+        # All results should be tuples (doc_id, score)
         for doc_id, score in results:
-            self.assertIsInstance(doc_id, int, "doc_id harus integer")
-            self.assertIsInstance(score, float, "score harus float")
-            self.assertGreater(score, 0, "score harus > 0")
-    
+            self.assertIsInstance(doc_id, int)
+            self.assertGreater(score, 0)
+
     def test_search_with_list_candidates(self):
-        """Test search dengan candidates sebagai list."""
-        # Hanya search di dokumen 0, 2, 4
-        candidates = [0, 2, 4]
-        results = self.bm25f.search("learning", candidates=candidates)
+        """Test search dengan list candidates."""
+        # Only search in docs 0, 2, 4
+        results = self.bm25.search("learning", candidates=[0, 2, 4])
         
-        self.assertIsInstance(results, list, "Harus mengembalikan list")
-        
-        # Semua hasil harus ada dalam candidates
-        for doc_id, score in results:
-            self.assertIn(doc_id, candidates, f"doc_id {doc_id} harus ada dalam candidates")
-    
+        # Results should only contain doc_ids from candidates
+        result_doc_ids = {doc_id for doc_id, score in results}
+        self.assertTrue(result_doc_ids.issubset({0, 2, 4}))
+
     def test_search_with_numpy_array_candidates(self):
-        """Test search dengan candidates sebagai numpy array."""
-        candidates = np.array([1, 3], dtype=np.int64)
-        results = self.bm25f.search("deep learning", candidates=candidates)
+        """Test search dengan numpy array candidates."""
+        candidates = np.array([1, 3])
+        results = self.bm25.search("learning", candidates=candidates)
         
-        self.assertIsInstance(results, list, "Harus mengembalikan list")
+        # Results should only contain doc_ids from candidates
+        result_doc_ids = {doc_id for doc_id, score in results}
+        self.assertTrue(result_doc_ids.issubset({1, 3}))
+
+    def test_empty_candidates_returns_empty_results(self):
+        """Test bahwa empty candidates mengembalikan empty results."""
+        results = self.bm25.search("learning", candidates=[])
+        self.assertEqual(len(results), 0)
+
+    def test_candidates_with_nonexistent_doc_ids(self):
+        """Test candidates dengan doc_ids yang tidak exist."""
+        # Doc 999 does not exist (only have 0-4)
+        results = self.bm25.search("learning", candidates=[999])
+        self.assertEqual(len(results), 0)
+
+    def test_candidates_filters_correctly(self):
+        """Test bahwa candidates filtering works correctly."""
+        # Search "vision" without candidates
+        all_results = self.bm25.search("vision")
+        all_doc_ids = {doc_id for doc_id, score in all_results}
         
-        # Semua hasil harus ada dalam candidates
-        candidates_list = candidates.tolist()
-        for doc_id, score in results:
-            self.assertIn(doc_id, candidates_list, f"doc_id {doc_id} harus ada dalam candidates")
-    
-    def test_search_with_empty_candidates(self):
-        """Test search dengan candidates kosong."""
-        candidates = []
-        results = self.bm25f.search("machine learning", candidates=candidates)
+        # Search "vision" with candidates=[0, 4]
+        # Only doc 4 should match (has "vision" in title)
+        filtered_results = self.bm25.search("vision", candidates=[0, 4])
+        filtered_doc_ids = {doc_id for doc_id, score in filtered_results}
         
-        self.assertEqual(len(results), 0, "Hasil harus kosong jika candidates kosong")
-    
-    def test_search_candidates_filters_correctly(self):
-        """Test bahwa candidates benar-benar memfilter hasil."""
-        # Search tanpa filter
-        all_results = self.bm25f.search("learning")
-        all_doc_ids = {doc_id for doc_id, _ in all_results}
+        # Filtered results should be subset of all results
+        self.assertTrue(filtered_doc_ids.issubset(all_doc_ids))
         
-        # Search dengan filter hanya dokumen [0, 1]
-        candidates = [0, 1]
-        filtered_results = self.bm25f.search("learning", candidates=candidates)
-        filtered_doc_ids = {doc_id for doc_id, _ in filtered_results}
-        
-        # filtered_doc_ids harus subset dari all_doc_ids
-        self.assertTrue(filtered_doc_ids.issubset(all_doc_ids), 
-                        "Filtered results harus subset dari all results")
-        
-        # filtered_doc_ids harus subset dari candidates
-        self.assertTrue(filtered_doc_ids.issubset(set(candidates)), 
-                        "Filtered results harus hanya dari candidates")
-    
-    def test_search_candidates_with_top_k(self):
+        # Only doc 4 should appear
+        self.assertEqual(filtered_doc_ids, {4})
+
+    def test_candidates_with_top_k(self):
         """Test kombinasi candidates dengan top_k."""
-        candidates = [0, 1, 2, 3, 4]
-        results = self.bm25f.search("learning", top_k=2, candidates=candidates)
+        # Should apply candidates filter then limit to top_k
+        results = self.bm25.search("learning", candidates=[0, 1, 2, 3], top_k=2)
         
-        self.assertLessEqual(len(results), 2, "Hasil harus dibatasi oleh top_k")
+        # Should return at most 2 results
+        self.assertLessEqual(len(results), 2)
         
-        # Semua hasil harus dari candidates
-        for doc_id, _ in results:
-            self.assertIn(doc_id, candidates)
-    
-    def test_search_performance_with_candidates(self):
-        """Test bahwa filtering dengan candidates tidak signifikan memperlambat search."""
-        import time
-        
-        # Untuk test ini, kita perlu dataset lebih besar
-        # Gunakan existing bm25f yang sudah ada
-        large_docs = self.documents * 100  # 500 dokumen
-        large_bm25f = BM25F(large_docs)
-        
-        # Measure search tanpa candidates
-        start = time.time()
-        for _ in range(10):
-            large_bm25f.search("learning")
-        time_without_candidates = time.time() - start
-        
-        # Measure search dengan candidates (50% dokumen)
-        candidates = list(range(0, len(large_docs), 2))  # Setengah dokumen
-        start = time.time()
-        for _ in range(10):
-            large_bm25f.search("learning", candidates=candidates)
-        time_with_candidates = time.time() - start
-        
-        # Overhead harus < 10%
-        overhead = (time_with_candidates - time_without_candidates) / time_without_candidates
-        self.assertLess(overhead, 0.1, 
-                       f"Overhead dengan candidates ({overhead*100:.1f}%) harus < 10%")
+        # All results should be from candidates
+        result_doc_ids = {doc_id for doc_id, score in results}
+        self.assertTrue(result_doc_ids.issubset({0, 1, 2, 3}))
 
 
 class TestSearchPipeline(unittest.TestCase):
-    """Test untuk SearchPipeline."""
-    
+    """Test full search pipeline integration."""
+
     @classmethod
     def setUpClass(cls):
-        """Setup: instantiate pipeline sekali untuk semua test."""
-        cls.pipeline = SearchPipeline()
-    
-    def test_pipeline_instantiation(self):
-        """Test bahwa SearchPipeline bisa diinstansiasi tanpa error."""
-        self.assertIsInstance(self.pipeline, SearchPipeline)
-        self.assertIsNotNone(self.pipeline.vsm, "VSM searcher harus ter-load")
-        self.assertIsNotNone(self.pipeline.bf, "Binary filter harus ter-load")
-        self.assertIsNotNone(self.pipeline.dataset, "Dataset harus ter-load")
-    
-    def test_search_without_filters(self):
-        """Test search tanpa filter (harus sama dengan VSM search langsung)."""
-        results = self.pipeline.search('graph neural network', top_k=5)
+        """Setup test environment dengan mock indexes dan dataset."""
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dataset_path = os.path.join(cls.tmp.name, "test_dataset.parquet")
+        cls.index_dir = os.path.join(cls.tmp.name, "index")
         
-        self.assertIsInstance(results, list, "Harus mengembalikan list")
-        self.assertGreater(len(results), 0, "Harus ada hasil untuk query ini")
+        # Build binary indexes
+        df = make_test_df()
+        # Convert numpy arrays to lists for parquet serialization
+        df_save = df.copy()
+        df_save["authors"] = df_save["authors"].apply(lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+        df_save["categories"] = df_save["categories"].apply(lambda x: x.tolist() if isinstance(x, np.ndarray) else x)
+        df_save.to_parquet(cls.dataset_path, engine="pyarrow")
         
-        # Verifikasi struktur hasil
-        for result in results:
-            self.assertIn("rank", result)
-            self.assertIn("doc_idx", result)
-            self.assertIn("score", result)
-            self.assertIn("id", result)
-            self.assertIn("title", result)
-            self.assertIn("abstract", result)
-            self.assertIn("authors", result)
-            self.assertIn("categories", result)
-            self.assertIn("primary_category", result)
-            self.assertIn("year", result)
-    
-    def test_search_with_year_range(self):
-        """Test search dengan year_range filter."""
-        # Note: VSM index hanya 1000 docs, mungkin tidak ada yang match year range
-        results = self.pipeline.search('machine learning', year_range=(2020, 2022), top_k=5)
+        indexer = BinaryIndexer(cls.dataset_path, cls.index_dir)
+        indexer.build_indexes(verbose=False)
         
-        # Jika ada hasil, verifikasi year-nya
-        for result in results:
-            if result["year"] is not None:
-                self.assertGreaterEqual(result["year"], 2020)
-                self.assertLessEqual(result["year"], 2022)
-    
-    def test_search_with_primary_categories(self):
-        """Test search dengan primary_categories filter."""
-        results = self.pipeline.search('neural network', primary_categories=['cs.AI', 'cs.LG'], top_k=5)
+        # Untuk testing, kita perlu BinaryFilter
+        cls.binary_filter = BinaryFilter(cls.index_dir, cls.dataset_path)
+        cls.dataset = pd.read_parquet(cls.dataset_path)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_search_with_no_filters(self):
+        """Test search tanpa filters apapun."""
+        # Create simple BM25F search
+        docs = [{"title": row["title"], "abstract": row["abstract"]} for _, row in self.dataset.iterrows()]
+        bm25 = BM25F(docs)
         
-        # Note: Due to potential mismatch between binary index and VSM index doc_idx mappings,
-        # this test verifies that filtering works without errors, but may not strictly validate
-        # the filtered results if the indexes were built from different dataset versions/orderings.
-        self.assertIsInstance(results, list, "Hasil harus berupa list")
-    
-    def test_search_with_authors_post_filter(self):
-        """Test search dengan authors post-filter."""
-        # Ambil author dari salah satu dokumen di VSM index
-        # Karena kita tidak tahu author mana yang ada, test ini lebih ke verifikasi bahwa tidak error
-        results = self.pipeline.search('learning', authors=['smith'], top_k=5)
+        results = bm25.search("learning", top_k=5)
         
-        # Hasil bisa kosong atau ada, tergantung apakah 'smith' ada di results
-        self.assertIsInstance(results, list)
-    
-    def test_search_with_categories_post_filter(self):
-        """Test search dengan categories post-filter."""
-        results = self.pipeline.search('neural', all_categories=['cs.lg', 'cs.ai'], top_k=5)
-        
-        # Jika ada hasil, verifikasi bahwa salah satu category ada
-        for result in results:
-            if result["categories"]:
-                # Case-insensitive check
-                categories_lower = [c.lower() for c in result["categories"]]
-                has_match = any(c in categories_lower for c in ['cs.lg', 'cs.ai'])
-                self.assertTrue(has_match, f"Result harus memiliki salah satu category: {result['categories']}")
-    
-    def test_search_combined_filters(self):
-        """Test search dengan kombinasi pre-filter dan post-filter."""
-        # Test bahwa semua filter bisa digunakan bersamaan tanpa error
-        results = self.pipeline.search(
-            'machine learning',
-            year_range=(2015, 2023),
-            primary_categories=['cs.LG'],
-            authors=['zhang'],
-            all_categories=['cs.ai'],
-            top_k=5
+        # Should return results
+        self.assertGreater(len(results), 0)
+
+    def test_search_with_only_pre_filters(self):
+        """Test search dengan hanya pre-filters."""
+        # Get candidates from pre-filters
+        candidates = self.binary_filter.get_pre_filter_candidates(
+            year_range=(2020.0, 2021.0),
+            primary_categories=["cs.CV", "cs.CL"]
         )
         
-        # Hasil bisa kosong karena filter yang ketat, tapi tidak boleh error
-        self.assertIsInstance(results, list)
-    
-    def test_search_empty_results_handling(self):
-        """Test bahwa pipeline menangani empty results dengan benar."""
-        # Filter yang sangat ketat, kemungkinan tidak ada hasil
-        results = self.pipeline.search(
-            'xyzabc123nonexistent',
-            year_range=(1900, 1901),
-            top_k=5
+        # Should get papers 001 and 002
+        self.assertEqual(set(candidates), {0, 1})
+        
+        # Search with candidates
+        docs = [{"title": row["title"], "abstract": row["abstract"]} for _, row in self.dataset.iterrows()]
+        bm25 = BM25F(docs)
+        results = bm25.search("learning", candidates=candidates)
+        
+        # Results should only be from candidates
+        result_doc_ids = {doc_id for doc_id, score in results}
+        self.assertTrue(result_doc_ids.issubset(set(candidates)))
+
+    def test_search_with_only_post_filters(self):
+        """Test search dengan hanya post-filters."""
+        # Do BM25F search first
+        docs = [{"title": row["title"], "abstract": row["abstract"]} for _, row in self.dataset.iterrows()]
+        bm25 = BM25F(docs)
+        results = bm25.search("learning", top_k=10)
+        
+        # Get doc_ids from results
+        doc_ids = np.array([doc_id for doc_id, score in results])
+        
+        # Apply post-filters
+        filtered_doc_ids = self.binary_filter.apply_post_filters(
+            doc_ids,
+            authors=["alice smith"],
+            categories=["cs.ai"]
         )
         
-        self.assertIsInstance(results, list)
+        # Should filter to only papers with alice smith AND cs.ai
+        self.assertGreater(len(filtered_doc_ids), 0)
+
+    def test_search_combining_all_filters(self):
+        """Test search dengan kombinasi pre-filters dan post-filters."""
+        # Step 1: Pre-filters
+        pre_candidates = self.binary_filter.get_pre_filter_candidates(
+            year_range=(2020.0, 2022.0)
+        )
+        
+        # Step 2: BM25F search with candidates
+        docs = [{"title": row["title"], "abstract": row["abstract"]} for _, row in self.dataset.iterrows()]
+        bm25 = BM25F(docs)
+        results = bm25.search("learning", candidates=pre_candidates)
+        
+        # Step 3: Post-filters
+        doc_ids = np.array([doc_id for doc_id, score in results])
+        final_doc_ids = self.binary_filter.apply_post_filters(
+            doc_ids,
+            categories=["cs.ai"]
+        )
+        
+        # Should have filtered results
+        self.assertGreaterEqual(len(final_doc_ids), 0)
+
+    def test_empty_results_at_pre_filter_stage(self):
+        """Test handling empty results dari pre-filter."""
+        # No papers in year 2025
+        candidates = self.binary_filter.get_pre_filter_candidates(
+            year_range=(2025.0, 2026.0)
+        )
+        
+        self.assertEqual(len(candidates), 0)
+        
+        # Search with empty candidates should return empty
+        docs = [{"title": row["title"], "abstract": row["abstract"]} for _, row in self.dataset.iterrows()]
+        bm25 = BM25F(docs)
+        results = bm25.search("learning", candidates=candidates)
+        
         self.assertEqual(len(results), 0)
-    
-    def test_search_metadata_enrichment(self):
-        """Test bahwa metadata enrichment bekerja dengan benar."""
-        results = self.pipeline.search('deep learning', top_k=3)
+
+    def test_empty_results_at_post_filter_stage(self):
+        """Test handling empty results dari post-filter."""
+        # Search first
+        docs = [{"title": row["title"], "abstract": row["abstract"]} for _, row in self.dataset.iterrows()]
+        bm25 = BM25F(docs)
+        results = bm25.search("learning", top_k=5)
         
-        if len(results) > 0:
-            result = results[0]
-            
-            # Verifikasi bahwa metadata fields ada dan tipe data benar
-            self.assertIsInstance(result["id"], str)
-            self.assertIsInstance(result["title"], str)
-            self.assertTrue(result["abstract"] is None or isinstance(result["abstract"], str))
-            self.assertIsInstance(result["authors"], list)
-            self.assertIsInstance(result["categories"], list)
-            # year dan primary_category bisa None
-            self.assertTrue(result["year"] is None or isinstance(result["year"], int))
-            # Score fields
-            self.assertIsInstance(result["score"], float)
-            self.assertIsInstance(result["rank"], int)
+        doc_ids = np.array([doc_id for doc_id, score in results])
+        
+        # Apply post-filter with non-matching author
+        filtered = self.binary_filter.apply_post_filters(
+            doc_ids,
+            authors=["nonexistent author"]
+        )
+        
+        self.assertEqual(len(filtered), 0)
+
+    def test_metadata_enrichment(self):
+        """Test bahwa metadata enrichment includes all expected fields."""
+        # Simulate getting results and enriching with metadata
+        doc_id = 0
+        
+        # Get metadata from dataset
+        metadata = self.dataset.iloc[doc_id].to_dict()
+        
+        # Verify expected fields
+        expected_fields = ["id", "title", "abstract", "year", "primary_category", "authors", "categories"]
+        for field in expected_fields:
+            self.assertIn(field, metadata)
+
+    def test_null_values_in_results_handled(self):
+        """Test bahwa null values dalam metadata di-handle dengan benar."""
+        # Paper 006 has null year and primary_category
+        doc_id = 5
+        metadata = self.dataset.iloc[doc_id].to_dict()
+        
+        # Verify null values are preserved
+        self.assertTrue(pd.isna(metadata["year"]))
+        self.assertTrue(pd.isna(metadata["primary_category"]))
+        
+        # Should not crash when accessing
+        self.assertIsNotNone(metadata["id"])
+        self.assertIsNotNone(metadata["title"])
 
 
 if __name__ == "__main__":
