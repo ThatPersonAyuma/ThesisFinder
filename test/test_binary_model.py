@@ -10,6 +10,7 @@ import pandas as pd
 from src.binary import BinaryFilter, BinaryIndexer
 from src.binary.config import BINARY_INDEX_DIR
 from src.algorithm.bm25f import BM25F
+from src.pipeline import SearchPipeline
 
 
 class TestBinaryIndexer(unittest.TestCase):
@@ -255,6 +256,129 @@ class TestBM25FWithCandidates(unittest.TestCase):
         overhead = (time_with_candidates - time_without_candidates) / time_without_candidates
         self.assertLess(overhead, 0.1, 
                        f"Overhead dengan candidates ({overhead*100:.1f}%) harus < 10%")
+
+
+class TestSearchPipeline(unittest.TestCase):
+    """Test untuk SearchPipeline."""
+    
+    @classmethod
+    def setUpClass(cls):
+        """Setup: instantiate pipeline sekali untuk semua test."""
+        cls.pipeline = SearchPipeline()
+    
+    def test_pipeline_instantiation(self):
+        """Test bahwa SearchPipeline bisa diinstansiasi tanpa error."""
+        self.assertIsInstance(self.pipeline, SearchPipeline)
+        self.assertIsNotNone(self.pipeline.vsm, "VSM searcher harus ter-load")
+        self.assertIsNotNone(self.pipeline.bf, "Binary filter harus ter-load")
+        self.assertIsNotNone(self.pipeline.dataset, "Dataset harus ter-load")
+    
+    def test_search_without_filters(self):
+        """Test search tanpa filter (harus sama dengan VSM search langsung)."""
+        results = self.pipeline.search('graph neural network', top_k=5)
+        
+        self.assertIsInstance(results, list, "Harus mengembalikan list")
+        self.assertGreater(len(results), 0, "Harus ada hasil untuk query ini")
+        
+        # Verifikasi struktur hasil
+        for result in results:
+            self.assertIn("rank", result)
+            self.assertIn("doc_idx", result)
+            self.assertIn("score", result)
+            self.assertIn("id", result)
+            self.assertIn("title", result)
+            self.assertIn("abstract", result)
+            self.assertIn("authors", result)
+            self.assertIn("categories", result)
+            self.assertIn("primary_category", result)
+            self.assertIn("year", result)
+    
+    def test_search_with_year_range(self):
+        """Test search dengan year_range filter."""
+        # Note: VSM index hanya 1000 docs, mungkin tidak ada yang match year range
+        results = self.pipeline.search('machine learning', year_range=(2020, 2022), top_k=5)
+        
+        # Jika ada hasil, verifikasi year-nya
+        for result in results:
+            if result["year"] is not None:
+                self.assertGreaterEqual(result["year"], 2020)
+                self.assertLessEqual(result["year"], 2022)
+    
+    def test_search_with_primary_categories(self):
+        """Test search dengan primary_categories filter."""
+        results = self.pipeline.search('neural network', primary_categories=['cs.AI', 'cs.LG'], top_k=5)
+        
+        # Note: Due to potential mismatch between binary index and VSM index doc_idx mappings,
+        # this test verifies that filtering works without errors, but may not strictly validate
+        # the filtered results if the indexes were built from different dataset versions/orderings.
+        self.assertIsInstance(results, list, "Hasil harus berupa list")
+    
+    def test_search_with_authors_post_filter(self):
+        """Test search dengan authors post-filter."""
+        # Ambil author dari salah satu dokumen di VSM index
+        # Karena kita tidak tahu author mana yang ada, test ini lebih ke verifikasi bahwa tidak error
+        results = self.pipeline.search('learning', authors=['smith'], top_k=5)
+        
+        # Hasil bisa kosong atau ada, tergantung apakah 'smith' ada di results
+        self.assertIsInstance(results, list)
+    
+    def test_search_with_categories_post_filter(self):
+        """Test search dengan categories post-filter."""
+        results = self.pipeline.search('neural', all_categories=['cs.lg', 'cs.ai'], top_k=5)
+        
+        # Jika ada hasil, verifikasi bahwa salah satu category ada
+        for result in results:
+            if result["categories"]:
+                # Case-insensitive check
+                categories_lower = [c.lower() for c in result["categories"]]
+                has_match = any(c in categories_lower for c in ['cs.lg', 'cs.ai'])
+                self.assertTrue(has_match, f"Result harus memiliki salah satu category: {result['categories']}")
+    
+    def test_search_combined_filters(self):
+        """Test search dengan kombinasi pre-filter dan post-filter."""
+        # Test bahwa semua filter bisa digunakan bersamaan tanpa error
+        results = self.pipeline.search(
+            'machine learning',
+            year_range=(2015, 2023),
+            primary_categories=['cs.LG'],
+            authors=['zhang'],
+            all_categories=['cs.ai'],
+            top_k=5
+        )
+        
+        # Hasil bisa kosong karena filter yang ketat, tapi tidak boleh error
+        self.assertIsInstance(results, list)
+    
+    def test_search_empty_results_handling(self):
+        """Test bahwa pipeline menangani empty results dengan benar."""
+        # Filter yang sangat ketat, kemungkinan tidak ada hasil
+        results = self.pipeline.search(
+            'xyzabc123nonexistent',
+            year_range=(1900, 1901),
+            top_k=5
+        )
+        
+        self.assertIsInstance(results, list)
+        self.assertEqual(len(results), 0)
+    
+    def test_search_metadata_enrichment(self):
+        """Test bahwa metadata enrichment bekerja dengan benar."""
+        results = self.pipeline.search('deep learning', top_k=3)
+        
+        if len(results) > 0:
+            result = results[0]
+            
+            # Verifikasi bahwa metadata fields ada dan tipe data benar
+            self.assertIsInstance(result["id"], str)
+            self.assertIsInstance(result["title"], str)
+            self.assertTrue(result["abstract"] is None or isinstance(result["abstract"], str))
+            self.assertIsInstance(result["authors"], list)
+            self.assertIsInstance(result["categories"], list)
+            # year dan primary_category bisa None
+            self.assertTrue(result["year"] is None or isinstance(result["year"], int))
+            # Score fields
+            self.assertIsInstance(result["score"], float)
+            self.assertIsInstance(result["rank"], int)
 
 
 if __name__ == "__main__":

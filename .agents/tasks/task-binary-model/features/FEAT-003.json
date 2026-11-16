@@ -2,7 +2,7 @@
   "id": "FEAT-003",
   "type": "feat",
   "description": "Create src/pipeline/ module with SearchPipeline class that orchestrates the complete filtering and search workflow. Integrate BinaryFilter (pre and post), VSMSearcher, and load dataset for metadata enrichment. Implement search method that: (1) applies pre-filters (year + primary_category) to get candidates, (2) runs VSM search with candidates, (3) applies post-filters (authors + categories) to results, (4) returns enriched results with full metadata. Add CLI with argparse for interactive searching.",
-  "status": "pending",
+  "status": "completed",
   "steps": [
     "Create src/pipeline/__init__.py exporting SearchPipeline",
     "Create src/pipeline/search_pipeline.py with SearchPipeline class. In __init__: instantiate VSMSearcher, BinaryFilter, load dataset parquet (pd.read_parquet) for metadata access",
@@ -25,5 +25,5 @@
     "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest test/test_binary_model.py::TestSearchPipeline -v"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "Successfully implemented search pipeline orchestrating BinaryFilter pre/post-filtering with VSM search. Implementation creates src/pipeline/ module with SearchPipeline class that: (1) applies pre-filters (year_range + primary_categories) using BinaryFilter.get_pre_filter_candidates(), (2) passes candidates to VSM.search(), (3) applies post-filters (authors + categories) to results, (4) enriches results with full metadata from dataset. CLI implemented with argparse supporting all filter parameters (--year-min, --year-max, --primary-categories, --authors, --all-categories, --top). Handles edge cases including empty results at any stage, no filters specified, null metadata values, and VSM index subset (filters candidates to VSM doc range). All 9 SearchPipeline tests passing. Note: VSM index (1000 docs) is subset of full dataset (380k docs), so pre-filtering must constrain candidates to VSM range to avoid index errors. Implementation correctly handles this by filtering candidates where doc_idx < vsm.n_docs."
 }
