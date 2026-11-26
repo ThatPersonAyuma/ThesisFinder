@@ -6,10 +6,19 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from src.vsm.cleaning.cleaning import clean_frequencies
+from src.vsm.cleaning.stemming import stemming
+from src.vsm.cleaning.stopword import hapus_stopword
+from src.vsm.cleaning.tokenizer import Tokenizer, build_vocab_csv
 from src.vsm.indexer import build_index, iter_papers
 from src.vsm.searcher import VSMSearcher
-from src.vsm.tfidf import (analyze_text, inverse_document_frequency, light_stem,
-                           term_frequency)
+from src.vsm.tfidf import (
+    analyze_text,
+    inverse_document_frequency,
+    light_stem,
+    term_frequency,
+    tokenize,
+)
 
 DOCS = [
     ("http://arxiv.org/abs/2101.00001v1", "Graph neural networks for molecules",
@@ -24,8 +33,9 @@ DOCS = [
 
 
 def make_df():
-    return pd.DataFrame({"id": [d[0] for d in DOCS], "title": [d[1] for d in DOCS],
-                         "abstract": [d[2] for d in DOCS]})
+    return pd.DataFrame(
+        {"id": [d[0] for d in DOCS], "title": [d[1] for d in DOCS], "abstract": [d[2] for d in DOCS]}
+    )
 
 
 class TestFormulas(unittest.TestCase):
@@ -42,11 +52,52 @@ class TestFormulas(unittest.TestCase):
         self.assertEqual(light_stem("models"), "model")
         self.assertEqual(light_stem("learning"), "learn")
         self.assertEqual(light_stem("studies"), "study")
+        self.assertEqual(light_stem("studied"), "study")
+        self.assertEqual(light_stem("approaches"), "approach")
         self.assertEqual(analyze_text("The Models of Learning"), ["model", "learn"])
 
+    def test_tokenize_strips_urls_unicode_and_pure_digits(self):
+        tokens = tokenize("Naïve approaches in 2025 see https://github.com/user/repo!")
+        self.assertEqual(tokens, ["naive", "approaches", "in", "see"])
+
     def test_stopword_from_frek_but_topic_words_kept(self):
-        self.assertEqual(analyze_text("often many graph neural network learning"),
-                         ["graph", "neural", "network", "learn"])
+        self.assertEqual(
+            analyze_text("often many graph neural network learning"),
+            ["graph", "neural", "network", "learn"],
+        )
+
+
+class TestCleaningAndTokenizer(unittest.TestCase):
+    def test_cleaning_merges_punctuation_before_min_freq_and_builds_tokenizer(self):
+        raw = pd.DataFrame({
+            "word": ["Neural,", "neural.", "https://example.com", "2025", "rareword", "approaches"],
+            "frequence": [3, 3, 20, 50, 2, 6],
+        })
+        cleaned = clean_frequencies(raw, min_freq=5, verbose=False)
+        freq_map = dict(zip(cleaned["word"], cleaned["frequence"]))
+        self.assertEqual(freq_map["neural"], 6)
+        self.assertEqual(freq_map["approaches"], 6)
+        self.assertNotIn("rareword", freq_map)
+        self.assertNotIn("2025", freq_map)
+
+        stopped = hapus_stopword(cleaned)
+        stemmed = stemming(stopped)
+        vocab_df = build_vocab_csv(stemmed)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            vocab_path = os.path.join(tmp, "vocab_clean.csv")
+            vocab_df.to_csv(vocab_path, index=False)
+            tok = Tokenizer(vocab_path)
+            self.assertIn("neural", tok.vocab)
+            self.assertIn("approach", tok.vocab)
+            vec = tok.vectorize("Neural approaches and neural!")
+            self.assertEqual(vec.shape, (len(tok),))
+            self.assertEqual(vec[tok.vocab["neural"]], 2)
+            self.assertEqual(vec[tok.vocab["approach"]], 1)
+
+            idf = np.full(len(tok), 2.0, dtype=np.float32)
+            tvec = tok.vectorize_tfidf("Neural approaches", idf)
+            self.assertAlmostEqual(float(np.linalg.norm(tvec)), 1.0, places=5)
 
 
 class TestIndexer(unittest.TestCase):
@@ -70,6 +121,28 @@ class TestIndexer(unittest.TestCase):
             with self.assertRaises(ValueError):
                 list(iter_papers(path))
 
+    def test_build_index_with_fixed_vocab_and_min_df(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d_vocab = os.path.join(tmp, "idx_vocab")
+            build_index([make_df()], d_vocab, vocab=["graph", "neural"], verbose=False)
+            s = VSMSearcher(d_vocab)
+            self.assertEqual(s.terms, ["graph", "neural"])
+            self.assertEqual(len(s.search("molecules")), 0)
+            self.assertGreater(len(s.search("graph")), 0)
+
+            d_mindf = os.path.join(tmp, "idx_mindf")
+            build_index([make_df()], d_mindf, min_df=2, verbose=False)
+            s2 = VSMSearcher(d_mindf)
+            self.assertIn("graph", s2.vocab)
+            self.assertNotIn("shortest", s2.vocab)
+
+    def test_empty_corpus_builds_valid_empty_index(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = build_index([], tmp, verbose=False)
+            self.assertEqual(cfg["n_docs"], 0)
+            s = VSMSearcher(tmp)
+            self.assertEqual(s.search("graph"), [])
+
 
 class TestSearch(unittest.TestCase):
     @classmethod
@@ -85,8 +158,10 @@ class TestSearch(unittest.TestCase):
     def test_only_title_and_abstract_indexed(self):
         self.assertEqual(self.s.fields, ("title", "abstract"))
         names = set(os.listdir(self.tmp.name))
-        self.assertTrue({"docvec_title.parquet", "docvec_abstract.parquet", "idf_title.npy", "df_abstract.npy",
-                         "vocab.json", "meta.parquet", "config.json"} <= names)
+        self.assertTrue(
+            {"docvec_title.parquet", "docvec_abstract.parquet", "idf_title.npy", "df_abstract.npy",
+             "vocab.json", "meta.parquet", "config.json"} <= names
+        )
         self.assertFalse(any("authors" in n or "keywords" in n for n in names))
         self.assertEqual(list(self.s.meta.columns), ["id", "title"])
 
@@ -103,25 +178,37 @@ class TestSearch(unittest.TestCase):
 
     def test_multi_field_dict(self):
         r = self.s.search({"title": "graph", "abstract": "molecular"})
-        self.assertEqual(r[0].doc_idx, 0)  # cocok di title DAN abstract
+        self.assertEqual(r[0].doc_idx, 0)
 
-    def test_candidate_filter(self):
+    def test_candidate_filter_and_edge_cases(self):
         mask = np.array([False, False, False, True])
         self.assertEqual([x.doc_idx for x in self.s.search("graph", candidates=mask)], [3])
         self.assertEqual([x.doc_idx for x in self.s.search("graph", candidates=[0, 1])], [0])
+        self.assertEqual(self.s.search("graph", candidates=[]), [])
+        self.assertEqual(self.s.search("graph", candidates=[999]), [])
+        self.assertEqual(self.s.search({"title": "   "}), [])
+        self.assertEqual(self.s.search("graph", top_k=0), [])
+
+        _, per_field = self.s.score_all("graph", candidates=[3])
+        self.assertEqual(per_field["title"][0], 0.0)
+        self.assertEqual(per_field["abstract"][0], 0.0)
 
     def test_docvec_parquet_format(self):
         d = pd.read_parquet(os.path.join(self.tmp.name, "docvec_title.parquet"))
         self.assertEqual(list(d.columns), ["doc", "term", "w"])
-        self.assertTrue((d.w > 0).all())  # nilai nol tidak disimpan
-        self.assertTrue((np.diff(d.doc.to_numpy()) >= 0).all())  # terurut menurut dokumen
-        norms = (d.assign(sq=d.w.astype("float64") ** 2).groupby("doc").sq.sum() ** 0.5)
-        np.testing.assert_allclose(norms.to_numpy(), 1.0, atol=1e-5)  # tiap vektor unit-length
+        self.assertTrue((d.w > 0).all())
+        self.assertTrue((np.diff(d.doc.to_numpy()) >= 0).all())
+        norms = d.assign(sq=d.w.astype("float64") ** 2).groupby("doc").sq.sum() ** 0.5
+        np.testing.assert_allclose(norms.to_numpy(), 1.0, atol=1e-5)
 
-    def test_doc_vector_saved(self):
+    def test_doc_vector_saved_and_query_vector(self):
         v = self.s.doc_vector(0, "title")
-        self.assertAlmostEqual(sum(w * w for w in v.values()), 1.0, places=5)  # vektor unit-length
+        self.assertAlmostEqual(sum(w * w for w in v.values()), 1.0, places=5)
         self.assertEqual(set(v), {"graph", "neural", "network", "molecule"})
+        qv = self.s.vectorize_query("graph neural", field="title")
+        self.assertAlmostEqual(float(np.linalg.norm(qv)), 1.0, places=5)
+        with self.assertRaises(IndexError):
+            self.s.doc_vector(99, "title")
 
     def test_unknown_field(self):
         for f in ("foo", "authors", "keywords"):

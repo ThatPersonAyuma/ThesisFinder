@@ -1,15 +1,18 @@
 import argparse
+from pathlib import Path
 
 import pandas as pd
 
-from ..tfidf import ROOT_DIR, light_stem
+from ..tfidf import VSM_DATA_DIR, light_stem
 
-INPUT = ROOT_DIR / "frek_stopword.csv"
-OUTPUT = ROOT_DIR / "frek_stem.csv"
+INPUT = VSM_DATA_DIR / "frek_stopword.csv"
+OUTPUT = VSM_DATA_DIR / "frek_stem.csv"
 
 
-# Stemming ringan (light_stem di tfidf.py), lalu frekuensi term yang sama digabung
 def stemming(df: pd.DataFrame) -> pd.DataFrame:
+    """Stemming ringan (light_stem di tfidf.py), lalu gabungkan frekuensi term yang sama."""
+    if len(df) == 0:
+        return df
     out = df.assign(word=df["word"].map(light_stem)).groupby("word", as_index=False)["frequence"].sum()
     return out.sort_values(["frequence", "word"], ascending=[False, True], ignore_index=True)
 
@@ -22,9 +25,10 @@ def main():
 
     df = pd.read_csv(args.input, dtype={"word": str}, keep_default_na=False)
     out = stemming(df)
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(args.output, index=False)
     print(f"stemming: {len(df):,} -> {len(out):,} | {args.output}")
 
 
 if __name__ == "__main__":
-    main()  
+    main()
