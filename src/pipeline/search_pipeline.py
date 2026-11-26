@@ -300,6 +300,66 @@ class SearchPipeline:
 
         return results
 
+    def rerank_ids(
+        self,
+        query: str,
+        doc_ids: str | list[str],
+        top_k: int | None = None,
+        bm25f_weights: dict | None = None,
+    ) -> list[dict]:
+        """Re-rank dokumen tertentu berdasarkan ``id`` dataset dengan BM25F.
+
+        ``doc_ids`` boleh satu id atau list id (mis. URL arXiv). Hanya dokumen
+        yang ditemukan di dataset yang dipertimbangkan.
+        """
+        if not query or not str(query).strip():
+            return []
+        if top_k is not None and top_k <= 0:
+            return []
+        if doc_ids is None:
+            return []
+        if isinstance(doc_ids, str):
+            doc_ids = [doc_ids]
+        wanted = {str(x) for x in doc_ids}
+        if not wanted:
+            return []
+
+        mask = self.dataset["id"].astype(str).isin(wanted).to_numpy()
+        positions = np.flatnonzero(mask)
+        if len(positions) == 0:
+            return []
+
+        struct_map = self._get_structure_map()
+        docs_by_id = []
+        for pos in positions:
+            pos = int(pos)
+            row = self.dataset.iloc[pos]
+            docs_by_id.append(
+                (pos, self._build_doc_dict(row, struct_map.get(str(row["id"]))))
+            )
+
+        bm25_ranked = BM25F.rerank(
+            query,
+            docs_by_id,
+            field_weights=bm25f_weights,
+            tokenizer=analyze_text,
+            corpus_idf=self._corpus_bm25f_idf(query),
+            fallback_missing_idf=True,
+            top_k=top_k,
+        )
+        results = []
+        for rank, (doc_idx, score) in enumerate(bm25_ranked, start=1):
+            row = self.dataset.iloc[doc_idx]
+            results.append({
+                "rank": rank,
+                "doc_idx": doc_idx,
+                "id": row["id"],
+                "title": row["title"],
+                "score": float(score),
+                "bm25f_score": float(score),
+            })
+        return results
+
     def __repr__(self):
         return f"SearchPipeline(vsm={self.vsm.n_docs} docs, bf={self.bf})"
 

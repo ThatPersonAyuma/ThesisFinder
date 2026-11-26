@@ -129,6 +129,14 @@ class TestIntegratedSearchPipeline(unittest.TestCase):
         results = self.pipeline.search("graph message passing", mode="hybrid", top_k=3)
         self.assertEqual(results[0]["doc_idx"], 0)
 
+    def test_rerank_ids_accepts_document_ids(self):
+        ids = [PAPERS[0]["id"], PAPERS[3]["id"]]
+        results = self.pipeline.rerank_ids("graph message passing", ids, top_k=2)
+        self.assertEqual({r["id"] for r in results}, set(ids))
+        self.assertEqual(results[0]["id"], ids[0])
+        self.assertEqual(self.pipeline.rerank_ids("graph", []), [])
+        self.assertEqual(self.pipeline.rerank_ids("graph", ["missing"]), [])
+
     def test_empty_and_invalid_inputs(self):
         self.assertEqual(self.pipeline.search("", top_k=5), [])
         self.assertEqual(self.pipeline.search("graph", year_range=(2099.0, 2100.0)), [])
