@@ -47,25 +47,43 @@ def build_index(batches, out_dir=INDEX_DIR, fields=FIELDS, verbose: bool = True)
     buf = {f: {"indices": array("i"), "counts": array("i"), "indptr": array("q", [0])} for f in fields}
     meta_parts = []
     n_docs = 0
+    # Statistik korpus untuk BM25F: df per dokumen (union semua field) dan total
+    # token per field. `seen` mencegah term yang sama di title dan abstract
+    # dihitung dua kali untuk dokumen yang sama.
+    df_global: list[int] = []
+    seen: list[int] = []
+    field_token_total = {f: 0 for f in fields}
 
     for batch in batches:
-        for f in fields:
-            analyzer = FIELD_ANALYZERS[f]
-            b = buf[f]
-            for text in batch[f].tolist():
-                for term, c in Counter(analyzer(text)).items():
+        base = n_docs
+        columns = {f: batch[f].tolist() for f in fields}
+        # Dokumen-major agar `seen` bisa mencegah term yang sama di title dan
+        # abstract dihitung dua kali untuk satu dokumen.
+        for doc_i in range(len(batch)):
+            seq = base + doc_i
+            for f in fields:
+                b = buf[f]
+                tokens = FIELD_ANALYZERS[f](columns[f][doc_i])
+                for term, c in Counter(tokens).items():
                     tid = vocab.get(term)
                     if tid is None:
                         tid = vocab[term] = len(vocab)
+                        df_global.append(0)
+                        seen.append(-1)
+                    if seen[tid] != seq:
+                        df_global[tid] += 1
+                        seen[tid] = seq
                     b["indices"].append(tid)
                     b["counts"].append(c)
                 b["indptr"].append(len(b["indices"]))
+                field_token_total[f] += len(tokens)
         meta_parts.append(batch[["id", "title"]])
         n_docs += len(batch)
         if verbose:
             print(f"  diproses {n_docs:,} dokumen | vocab {len(vocab):,} | {time.time() - t0:.0f}s", flush=True)
 
     n_terms = len(vocab)
+    np.save(out_dir / "df_global.npy", np.asarray(df_global, dtype=np.int32))
     field_stats = {}
     for f in fields:
         b = buf[f]
@@ -100,6 +118,10 @@ def build_index(batches, out_dir=INDEX_DIR, fields=FIELDS, verbose: bool = True)
         "n_docs": n_docs,
         "n_terms": n_terms,
         "fields": list(fields),
+        "avgdl": {
+            f: (field_token_total[f] / n_docs if n_docs else 0.0)
+            for f in fields
+        },
         "field_stats": field_stats,
         "weighting": "tf=1+ln(count); idf=ln((N+1)/(df+1))+1; L2-normalized rows; cosine",
         "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),

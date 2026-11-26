@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -9,7 +10,9 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
-from .tfidf import DEFAULT_FIELD_WEIGHTS, FIELD_ANALYZERS, INDEX_DIR, query_vector
+from ..algorithm.bm25f import BM25F
+from .tfidf import (DATASET_PATH, DEFAULT_FIELD_WEIGHTS, FIELD_ANALYZERS, INDEX_DIR,
+                    analyze_text, query_vector)
 
 @dataclass
 class SearchResult:
@@ -22,7 +25,7 @@ class SearchResult:
 
 
 class VSMSearcher:
-    def __init__(self, index_dir=INDEX_DIR):
+    def __init__(self, index_dir=INDEX_DIR, dataset_path=DATASET_PATH):
         index_dir = Path(index_dir)
         if not (index_dir / "config.json").exists():
             raise FileNotFoundError(
@@ -39,6 +42,14 @@ class VSMSearcher:
         self.matrix = {f: self._load_docvec(f).tocsc() for f in self.fields}
         self.idf = {f: np.load(index_dir / f"idf_{f}.npy") for f in self.fields}
         self.meta = pd.read_parquet(index_dir / "meta.parquet")
+        # Statistik korpus untuk BM25F; indeks lama mungkin belum punya.
+        df_global_path = index_dir / "df_global.npy"
+        self.df_global = np.load(df_global_path) if df_global_path.exists() else None
+        if self.df_global is not None and len(self.df_global) != len(self.terms):
+            self.df_global = None
+        self.bm25_avgdl = self.config.get("avgdl") or None
+        self.dataset_path = Path(dataset_path)
+        self._dataset = None
 
     def _load_docvec(self, field: str) -> sp.csr_matrix:
         # docvec_<field>.parquet (doc, term, w) -> matriks CSR (baris = dokumen, kolom = term)
@@ -149,6 +160,63 @@ class VSMSearcher:
                 field_scores={f: float(per_field[f][i]) for f in per_field}))
         return out
 
+    def _load_dataset(self) -> pd.DataFrame:
+        # BM25 butuh teks mentah, bukan vektor TF-IDF; cache agar tidak dibaca tiap query.
+        if self._dataset is None:
+            self._dataset = pd.read_parquet(self.dataset_path, columns=["title", "abstract"])
+        return self._dataset
+
+    def _corpus_idf(self, text):
+        """IDF BM25F dari df seluruh korpus; None jika indeks lama belum punya df_global."""
+        if self.df_global is None:
+            return None
+        idf = {}
+        for term in set(analyze_text(text)):
+            tid = self.vocab.get(term)
+            if tid is None:
+                continue
+            df = min(max(int(self.df_global[tid]), 0), self.n_docs)
+            idf[term] = math.log((self.n_docs - df + 0.5) / (df + 0.5) + 1)
+        return idf
+
+    def search_bm25(self, query, top_k=10, candidate_k=100, candidates=None):
+        """VSM mengambil `candidate_k` kandidat, lalu BM25F mengurutkan ulang.
+
+        Query dict {field: teks} digabung karena BM25F memakai satu query untuk
+        semua field. IDF dan avgdl memakai statistik korpus dari indeks; jika
+        indeks lama belum menyimpannya, fallback ke statistik kandidat. Hasil
+        memakai doc_idx yang sama dengan indeks VSM.
+        """
+        text = " ".join(str(q) for q in query.values() if q) if isinstance(query, dict) else query
+        if not text or not str(text).strip() or (top_k is not None and top_k <= 0):
+            return []
+        if candidate_k is not None and top_k is not None:
+            candidate_k = max(candidate_k, top_k)
+
+        cand_idx, _ = self.top_candidates(text, top_n=candidate_k, candidates=candidates)
+        if len(cand_idx) == 0:
+            return []
+
+        dataset = self._load_dataset()
+        docs = []
+        for i in cand_idx:
+            row = dataset.iloc[int(i)]
+            docs.append({
+                "title": "" if pd.isna(row["title"]) else str(row["title"]),
+                "abstract": "" if pd.isna(row["abstract"]) else str(row["abstract"]),
+            })
+
+        model = BM25F(docs, tokenizer=analyze_text,
+                      corpus_idf=self._corpus_idf(text),
+                      field_avgdl=self.bm25_avgdl)
+        out = []
+        for rank, (local_id, score) in enumerate(model.search(text, top_k=top_k), start=1):
+            i = int(cand_idx[local_id])
+            row = self.meta.iloc[i]
+            out.append(SearchResult(
+                rank=rank, doc_idx=i, id=row["id"], title=row["title"], score=float(score)))
+        return out
+
     @staticmethod
     def _top(scores: np.ndarray, k):
         nz = np.flatnonzero(scores > 0)
@@ -163,12 +231,15 @@ class VSMSearcher:
 
 # ===== CLI =====
 def main():
-    ap = argparse.ArgumentParser(description="Cari artikel dengan VSM (TF-IDF pre-compute)")
+    ap = argparse.ArgumentParser(description="Cari artikel dengan VSM (TF-IDF) atau BM25F")
     ap.add_argument("query", nargs="?", default=None, help="query untuk semua field terpilih")
     ap.add_argument("--fields", nargs="*", default=None, help="field yang dipakai (title abstract)")
     for f in ("title", "abstract"):
         ap.add_argument(f"--{f}", default=None, help=f"query khusus field {f}")
     ap.add_argument("--top", type=int, default=10)
+    ap.add_argument("--bm25", action="store_true", help="rerank kandidat VSM dengan BM25F")
+    ap.add_argument("--candidate-k", type=int, default=100,
+                    help="jumlah kandidat VSM yang di-rerank BM25 (default: 100)")
     ap.add_argument("--index", default=None, help="folder indeks (default: data/index/vsm)")
     args = ap.parse_args()
 
@@ -179,11 +250,14 @@ def main():
 
     s = VSMSearcher(args.index) if args.index else VSMSearcher()
     t = time.perf_counter()
-    results = s.search(query, fields=args.fields, top_k=args.top)
+    if args.bm25:
+        results = s.search_bm25(query, top_k=args.top, candidate_k=args.candidate_k)
+    else:
+        results = s.search(query, fields=args.fields, top_k=args.top)
     ms = (time.perf_counter() - t) * 1000
     print(f"{len(results)} hasil ({ms:.1f} ms)\n")
     for r in results:
-        fs = " ".join(f"{k[:3]}={v:.2f}" for k, v in r.field_scores.items())
+        fs = " ".join(f"{k[:3]}={v:.2f}" for k, v in r.field_scores.items()) or "bm25"
         print(f"{r.rank:>2}. [{r.score:.3f}] {r.title}\n    {r.id} | {fs}")
 
 
