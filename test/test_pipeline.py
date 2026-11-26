@@ -8,6 +8,7 @@ import pandas as pd
 
 from src.binary.indexer import BinaryIndexer
 from src.pipeline.search_pipeline import SearchPipeline
+from src.pipeline.setup import ensure_indexes
 from src.vsm.indexer import build_index_from_parquet
 
 PAPERS = [
@@ -134,6 +135,34 @@ class TestIntegratedSearchPipeline(unittest.TestCase):
         self.assertEqual(self.pipeline.search("graph", authors=["Unknown Person"]), [])
         with self.assertRaises(ValueError):
             self.pipeline.search("graph", mode="invalid_mode")
+
+    def test_ensure_indexes_builds_missing_indexes_for_fresh_clone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ds = os.path.join(tmp, "papers.parquet")
+            vsm_dir = os.path.join(tmp, "idx_vsm")
+            bin_dir = os.path.join(tmp, "idx_bin")
+            pd.DataFrame(PAPERS).to_parquet(ds, engine="pyarrow", index=False)
+
+            res = ensure_indexes(
+                dataset_path=ds,
+                vsm_index_dir=vsm_dir,
+                binary_index_dir=bin_dir,
+                vocab_path=None,
+                verbose=False,
+            )
+            self.assertTrue(res["built_vsm"])
+            self.assertTrue(res["built_binary"])
+            self.assertEqual(res["vsm_docs"], len(PAPERS))
+            self.assertEqual(res["binary_docs"], len(PAPERS))
+
+            pipe = SearchPipeline(
+                dataset_path=ds,
+                vsm_index_dir=vsm_dir,
+                binary_index_dir=bin_dir,
+                verbose=False,
+            )
+            hits = pipe.search("graph", mode="hybrid", top_k=2)
+            self.assertGreater(len(hits), 0)
 
 
 if __name__ == "__main__":

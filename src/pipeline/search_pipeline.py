@@ -20,6 +20,7 @@ import pandas as pd
 from src.algorithm.bm25f import BM25F
 from src.binary import BinaryFilter
 from src.binary.config import BINARY_INDEX_DIR, DATASET_PATH
+from src.pipeline.setup import ensure_indexes
 from src.vsm.searcher import VSMSearcher
 from src.vsm.tfidf import INDEX_DIR as VSM_INDEX_DIR
 from src.vsm.tfidf import analyze_text
@@ -320,6 +321,11 @@ def main():
     parser.add_argument("--authors", nargs="+", default=None, help="Author names untuk post-filtering")
     parser.add_argument("--all-categories", nargs="+", default=None, help="Categories untuk post-filtering")
     parser.add_argument("--top", type=int, default=10, help="Jumlah maksimal hasil (default: 10)")
+    parser.add_argument(
+        "--no-auto-build",
+        action="store_true",
+        help="Jangan bangun indeks otomatis bila belum tersedia",
+    )
 
     args = parser.parse_args()
 
@@ -329,6 +335,8 @@ def main():
         year_max = args.year_max if args.year_max is not None else 9999
         year_range = (year_min, year_max)
 
+    if not args.no_auto_build:
+        ensure_indexes(verbose=True)
     print("Initializing pipeline...\n")
     pipeline = SearchPipeline()
 

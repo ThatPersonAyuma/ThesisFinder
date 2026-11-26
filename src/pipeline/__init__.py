@@ -4,6 +4,7 @@ from importlib import import_module
 
 _EXPORTS = {
     "SearchPipeline": ("search_pipeline", "SearchPipeline"),
+    "ensure_indexes": ("setup", "ensure_indexes"),
 }
 
 __all__ = list(_EXPORTS)
