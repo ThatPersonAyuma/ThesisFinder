@@ -34,7 +34,7 @@ DEFAULT_FIELD_WEIGHTS = {
     "kesimpulan": 1.0,
 }
 
-INDEX_FORMAT_VERSION = 1
+INDEX_FORMAT_VERSION = 2
 
 
 # ===== 2. PRA-PEMROSESAN TEKS =====

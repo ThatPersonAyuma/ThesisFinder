@@ -63,7 +63,13 @@ def _load_fixed_vocab(vocab) -> dict[str, int] | None:
     return dict(tok.vocab)
 
 
-def _prune_min_df(buf: dict, vocab: dict[str, int], fields: tuple[str, ...], min_df: int):
+def _prune_min_df(
+    buf: dict,
+    vocab: dict[str, int],
+    fields: tuple[str, ...],
+    min_df: int,
+    df_global: list[int] | None = None,
+):
     """Buang term dengan total kemunculan dokumen < min_df dan rapatkan ID term."""
     n_terms = len(vocab)
     if min_df <= 1 or n_terms == 0:
@@ -104,6 +110,9 @@ def _prune_min_df(buf: dict, vocab: dict[str, int], fields: tuple[str, ...], min
             new_ptr.append(len(new_idx))
         buf[f] = {"indices": new_idx, "counts": new_cnt, "indptr": new_ptr}
 
+    if df_global is not None:
+        df_global[:] = [df_global[int(i)] for i in kept_old_ids]
+
     return new_vocab
 
 
@@ -129,15 +138,27 @@ def build_index(
     buf = {f: {"indices": array("i"), "counts": array("i"), "indptr": array("q", [0])} for f in fields}
     meta_parts = []
     n_docs = 0
+    # Statistik korpus untuk BM25F: df per dokumen (union semua field) dan total
+    # token per field. `seen` mencegah term yang sama di title dan abstract
+    # dihitung dua kali untuk dokumen yang sama. Untuk fixed vocab, statistik
+    # diinisialisasi sepanjang vocab yang sudah ada.
+    df_global: list[int] = [0] * len(vocab_map)
+    seen: list[int] = [-1] * len(vocab_map)
+    field_token_total = {f: 0 for f in fields}
 
     for batch in batches:
         if len(batch) == 0:
             continue
-        for f in fields:
-            analyzer = FIELD_ANALYZERS[f]
-            b = buf[f]
-            for text in batch[f].tolist():
-                for term, c in Counter(analyzer(text)).items():
+        base = n_docs
+        columns = {f: batch[f].tolist() for f in fields}
+        # Dokumen-major agar `seen` bisa mencegah term yang sama di title dan
+        # abstract dihitung dua kali untuk satu dokumen.
+        for doc_i in range(len(batch)):
+            seq = base + doc_i
+            for f in fields:
+                b = buf[f]
+                tokens = FIELD_ANALYZERS[f](columns[f][doc_i])
+                for term, c in Counter(tokens).items():
                     if fixed_vocab is not None:
                         tid = vocab_map.get(term)
                         if tid is None:
@@ -146,18 +167,25 @@ def build_index(
                         tid = vocab_map.get(term)
                         if tid is None:
                             tid = vocab_map[term] = len(vocab_map)
+                            df_global.append(0)
+                            seen.append(-1)
+                    if seen[tid] != seq:
+                        df_global[tid] += 1
+                        seen[tid] = seq
                     b["indices"].append(tid)
                     b["counts"].append(c)
                 b["indptr"].append(len(b["indices"]))
+                field_token_total[f] += len(tokens)
         meta_parts.append(batch[["id", "title"]])
         n_docs += len(batch)
         if verbose:
             print(f"  diproses {n_docs:,} dokumen | vocab {len(vocab_map):,} | {time.time() - t0:.0f}s", flush=True)
 
     if fixed_vocab is None and min_df > 1:
-        vocab_map = _prune_min_df(buf, vocab_map, fields, min_df)
+        vocab_map = _prune_min_df(buf, vocab_map, fields, min_df, df_global)
 
     n_terms = len(vocab_map)
+    np.save(out_dir / "df_global.npy", np.asarray(df_global, dtype=np.int32))
     field_stats = {}
     for f in fields:
         b = buf[f]
@@ -198,6 +226,10 @@ def build_index(
         "fields": list(fields),
         "vocab_source": str(vocab) if isinstance(vocab, (str, Path)) else ("custom" if fixed_vocab is not None else "corpus"),
         "min_df": min_df if fixed_vocab is None else None,
+        "avgdl": {
+            f: (field_token_total[f] / n_docs if n_docs else 0.0)
+            for f in fields
+        },
         "field_stats": field_stats,
         "weighting": "tf=1+ln(count); idf=ln((N+1)/(df+1))+1; L2-normalized rows; cosine",
         "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),

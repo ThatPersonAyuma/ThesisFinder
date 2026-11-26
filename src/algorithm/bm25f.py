@@ -26,7 +26,15 @@ class BM25F:
 
     ``documents`` berupa string (field ``body``) atau dict ``{field: teks}``.
     ``k1`` mengatur saturasi tf, ``b`` normalisasi panjang (boleh per field),
-    dan ``field_weights`` bobot field (default: title 3.0, abstract 1.0).
+    ``field_weights`` bobot field (default: title 3.0, abstract 1.0), dan
+    ``tokenizer`` fungsi teks -> list token (default: regex ``\\w+``).
+
+    ``corpus_idf`` dan ``field_avgdl`` opsional untuk memakai statistik korpus
+    penuh saat hanya sebagian dokumen (kandidat) yang diberikan. Jika
+    ``corpus_idf`` diisi, ia menggantikan IDF lokal; term yang tidak ada di
+    dalamnya tidak diberi skor. ``fallback_missing_idf=True`` memakai IDF lokal
+    untuk term yang tidak ada di ``corpus_idf`` (berguna untuk field tambahan
+    yang belum punya df korpus).
     """
 
     def __init__(
@@ -38,11 +46,12 @@ class BM25F:
         tokenizer=None,
         corpus_idf=None,
         field_avgdl=None,
+        fallback_missing_idf=False,
     ):
         self.documents = documents
         self.k1 = k1
         self.b = b
-        self._custom_tokenizer = tokenizer
+        self._tokenizer = tokenizer
         self.N = len(documents)
         self.fields = self._detect_fields(documents)
 
@@ -71,7 +80,8 @@ class BM25F:
             f: (sum(lengths) / self.N) if self.N > 0 else 0.0
             for f, lengths in self.field_doc_length.items()
         }
-        if field_avgdl:
+        # Statistik korpus penuh menggantikan rata-rata lokal kandidat.
+        if field_avgdl is not None:
             self.field_avgdl = {
                 f: float(field_avgdl.get(f, computed_avgdl[f])) for f in self.fields
             }
@@ -104,7 +114,7 @@ class BM25F:
             sum(self.field_doc_length[f][i] for f in self.fields)
             for i in range(self.N)
         ]
-        self.avgdl = (sum(self.doc_length) / self.N) if self.N > 0 else 0.0
+        self.avgdl = sum(self.field_avgdl.values())
 
         # Inverted index: term -> {doc_id: {field: tf}}.
         self.index = defaultdict(dict)
@@ -115,12 +125,23 @@ class BM25F:
 
         # df dihitung per dokumen, bukan per field.
         self.doc_freq = Counter({term: len(postings) for term, postings in self.index.items()})
-        self.idf = {}
-        for term, df in self.doc_freq.items():
-            if corpus_idf is not None and term in corpus_idf:
-                self.idf[term] = float(corpus_idf[term])
-            else:
-                self.idf[term] = math.log((self.N - df + 0.5) / (df + 0.5) + 1)
+        local_idf = {
+            term: math.log((self.N - df + 0.5) / (df + 0.5) + 1)
+            for term, df in self.doc_freq.items()
+        }
+        if corpus_idf is None:
+            self.idf = local_idf
+        elif fallback_missing_idf:
+            # Field tambahan (mis. struktur) mungkin belum punya df korpus;
+            # term yang tidak ada di corpus_idf memakai IDF lokal kandidat.
+            self.idf = {
+                term: float(corpus_idf.get(term, local_idf[term]))
+                for term in self.doc_freq
+            }
+        else:
+            # IDF korpus penuh menggantikan IDF lokal kandidat. Term yang tidak
+            # ada di corpus_idf tidak diberi skor.
+            self.idf = {term: float(value) for term, value in corpus_idf.items()}
 
     @staticmethod
     def _detect_fields(documents):
@@ -141,8 +162,8 @@ class BM25F:
         return [SINGLE_FIELD]
 
     def _tokenize(self, text):
-        if self._custom_tokenizer is not None:
-            return self._custom_tokenizer(text)
+        if self._tokenizer is not None:
+            return self._tokenizer(text)
         return re.findall(r"\w+", text.lower())
 
     def _weighted_tf(self, doc_id, field_tfs):
@@ -169,8 +190,9 @@ class BM25F:
             if not postings:
                 continue
             field_tfs = postings.get(doc_id)
-            if field_tfs:
-                total_score += self._term_score(self.idf[term], doc_id, field_tfs)
+            term_idf = self.idf.get(term)
+            if field_tfs and term_idf is not None:
+                total_score += self._term_score(term_idf, doc_id, field_tfs)
 
         return total_score
 
@@ -186,7 +208,9 @@ class BM25F:
             if not postings:
                 continue
 
-            term_idf = self.idf[term]
+            term_idf = self.idf.get(term)
+            if term_idf is None:
+                continue
             for doc_id, field_tfs in postings.items():
                 if candidates_set is not None and doc_id not in candidates_set:
                     continue
@@ -194,11 +218,10 @@ class BM25F:
 
         results = sorted(
             ((doc_id, score) for doc_id, score in scores.items() if score > 0),
-            key=lambda x: x[1],
-            reverse=True,
+            key=lambda x: (-x[1], x[0]),  # skor menurun, tie-break doc_id naik
         )
         if top_k is not None:
-            return results[:top_k]
+            return results[:top_k] if top_k > 0 else []
         return results
 
     @classmethod
@@ -212,6 +235,7 @@ class BM25F:
         tokenizer=None,
         corpus_idf: dict[str, float] | None = None,
         field_avgdl: dict[str, float] | None = None,
+        fallback_missing_idf: bool = False,
         top_k: int | None = None,
     ) -> list[tuple[int, float]]:
         """Re-rank dokumen kandidat [(doc_idx, doc_dict)] dengan BM25F dan kembalikan doc_idx asli."""
@@ -232,6 +256,7 @@ class BM25F:
             tokenizer=tokenizer,
             corpus_idf=corpus_idf,
             field_avgdl=field_avgdl,
+            fallback_missing_idf=fallback_missing_idf,
         )
         local_ranked = model.search(query, top_k=top_k)
         return [(doc_ids[local_id], float(score)) for local_id, score in local_ranked]
