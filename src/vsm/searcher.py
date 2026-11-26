@@ -11,8 +11,16 @@ import pandas as pd
 import scipy.sparse as sp
 
 from ..algorithm.bm25f import BM25F
-from .tfidf import (DATASET_PATH, DEFAULT_FIELD_WEIGHTS, FIELD_ANALYZERS, INDEX_DIR,
-                    analyze_text, query_vector)
+from .tfidf import (
+    DATASET_PATH,
+    DEFAULT_FIELD_WEIGHTS,
+    FIELD_ANALYZERS,
+    FIELDS,
+    INDEX_DIR,
+    OPTIONAL_FIELDS,
+    analyze_text,
+    query_vector,
+)
 
 @dataclass
 class SearchResult:
@@ -29,7 +37,8 @@ class VSMSearcher:
         index_dir = Path(index_dir)
         if not (index_dir / "config.json").exists():
             raise FileNotFoundError(
-                f"Indeks belum ada di {index_dir}. Jalankan: python -m src.vsm.indexer")
+                f"Indeks belum ada di {index_dir}. Jalankan: python -m src.vsm.indexer"
+            )
         self.config = json.loads((index_dir / "config.json").read_text(encoding="utf-8"))
         terms = json.loads((index_dir / "vocab.json").read_text(encoding="utf-8"))
         self.vocab = {t: i for i, t in enumerate(terms)}
@@ -52,19 +61,19 @@ class VSMSearcher:
         self._dataset = None
 
     def _load_docvec(self, field: str) -> sp.csr_matrix:
-        # docvec_<field>.parquet (doc, term, w) -> matriks CSR (baris = dokumen, kolom = term)
         d = pd.read_parquet(self.index_dir / f"docvec_{field}.parquet")
         doc, term, w = d["doc"].to_numpy(), d["term"].to_numpy(), d["w"].to_numpy()
         if len(doc) > 1 and (np.diff(doc) < 0).any():
             order = np.argsort(doc, kind="stable")
             doc, term, w = doc[order], term[order], w[order]
-        indptr = np.concatenate(([0], np.cumsum(np.bincount(doc, minlength=self.n_docs)))).astype(np.int64)
+        counts = np.bincount(doc, minlength=self.n_docs) if len(doc) > 0 else np.zeros(self.n_docs, dtype=np.int64)
+        indptr = np.concatenate(([0], np.cumsum(counts))).astype(np.int64)
         return sp.csr_matrix((w, term, indptr), shape=(self.n_docs, len(self.terms)))
 
-    #  komponen internal 
+    # komponen internal
     def _field_query(self, text: str, f: str):
         """Query string -> (term_ids, bobot) ternormalisasi untuk field f (term tak dikenal dibuang)."""
-        counts = Counter()
+        counts: Counter[int] = Counter()
         for tok in FIELD_ANALYZERS[f](text):
             tid = self.vocab.get(tok)
             if tid is not None:
@@ -74,16 +83,24 @@ class VSMSearcher:
     def _resolve(self, query, fields, weights):
         """Susun {field: teks_query} dan {field: bobot} dari argumen pemanggil."""
         if isinstance(query, dict):
-            qmap = {f: q for f, q in query.items() if q and q.strip()}
-            unknown = set(qmap) - set(self.fields)
-            if unknown:
-                raise ValueError(f"Field tidak dikenal: {sorted(unknown)}; pilihan: {list(self.fields)}")
+            unknown_keys = set(query) - set(self.fields)
+            if unknown_keys:
+                raise ValueError(
+                    f"Field tidak dikenal: {sorted(unknown_keys)}; pilihan: {list(self.fields)}"
+                )
+            qmap = {f: q for f, q in query.items() if q and str(q).strip()}
         else:
             chosen = list(fields) if fields else list(self.fields)
             unknown = set(chosen) - set(self.fields)
             if unknown:
                 raise ValueError(f"Field tidak dikenal: {sorted(unknown)}; pilihan: {list(self.fields)}")
+            if not query or not str(query).strip():
+                return {}, {}
             qmap = {f: query for f in chosen}
+
+        if not qmap:
+            return {}, {}
+
         w = {f: float((weights or {}).get(f, DEFAULT_FIELD_WEIGHTS.get(f, 1.0))) for f in qmap}
         total = sum(w.values())
         if total <= 0:
@@ -98,15 +115,42 @@ class VSMSearcher:
             if arr.shape != (self.n_docs,):
                 raise ValueError("Mask kandidat harus sepanjang jumlah dokumen indeks")
             return arr
+        if arr.size == 0:
+            return np.zeros(self.n_docs, dtype=bool)
+        idx = arr.astype(np.int64).ravel()
+        if (idx < 0).any():
+            raise ValueError("Indeks kandidat tidak boleh negatif")
+        idx = idx[idx < self.n_docs]
         mask = np.zeros(self.n_docs, dtype=bool)
-        mask[arr.astype(np.int64)] = True
+        if len(idx) > 0:
+            mask[idx] = True
         return mask
 
-    #  API publik 
+    # API publik
+    def vectorize_query(self, text: str, field: str = "abstract", sparse: bool = False):
+        """Query string -> vektor TF-IDF ternormalisasi sepanjang vocab indeks."""
+        if field not in self.fields:
+            raise ValueError(f"Field tidak dikenal: {field}; pilihan: {list(self.fields)}")
+        ids, qw = self._field_query(text, field)
+        if sparse:
+            return sp.csr_matrix(
+                (qw.astype(np.float32), (np.zeros(len(ids), dtype=np.int64), ids)),
+                shape=(1, len(self.terms)),
+            )
+        vec = np.zeros(len(self.terms), dtype=np.float32)
+        if len(ids) > 0:
+            vec[ids] = qw.astype(np.float32)
+        return vec
+
     def score_all(self, query, fields=None, weights=None, candidates=None):
         """Skor cosine terbobot untuk SEMUA dokumen. Mengembalikan (skor_total, {field: skor_field})."""
         qmap, w = self._resolve(query, fields, weights)
+        mask = self._candidate_mask(candidates)
         total = np.zeros(self.n_docs, dtype=np.float32)
+        if not qmap or (mask is not None and not mask.any()):
+            per_field = {f: np.zeros(self.n_docs, dtype=np.float32) for f in qmap}
+            return total, per_field
+
         per_field = {}
         for f, text in qmap.items():
             ids, qw = self._field_query(text, f)
@@ -114,27 +158,30 @@ class VSMSearcher:
                 per_field[f] = np.zeros(self.n_docs, dtype=np.float32)
                 continue
             s = self.matrix[f][:, ids].dot(qw.astype(np.float32))
-            per_field[f] = np.asarray(s, dtype=np.float32).ravel()
-            total += w[f] * per_field[f]
-        mask = self._candidate_mask(candidates)
-        if mask is not None:
-            total[~mask] = 0.0
+            arr = np.asarray(s, dtype=np.float32).ravel()
+            if mask is not None:
+                arr[~mask] = 0.0
+            per_field[f] = arr
+            total += w[f] * arr
         return total, per_field
 
     def doc_vector(self, doc_idx: int, field: str, top: int | None = None) -> dict:
-        # Vektor TF-IDF tersimpan milik satu dokumen pada satu field: {term: bobot}, bobot terbesar dulu.
-        # Dibaca dari docvec_<field>.parquet (field kosong -> {}).
+        """Vektor TF-IDF tersimpan milik satu dokumen pada satu field: {term: bobot}."""
         if field not in self.fields:
             raise ValueError(f"Field tidak dikenal: {field}; pilihan: {list(self.fields)}")
-        if not hasattr(self, "_docvec_csr"):
-            self._docvec_csr = {}
-        if field not in self._docvec_csr:
-            self._docvec_csr[field] = self._load_docvec(field)
-        row = self._docvec_csr[field][int(doc_idx)]
-        order = np.argsort(-row.data)
+        doc_idx = int(doc_idx)
+        if doc_idx < 0 or doc_idx >= self.n_docs:
+            raise IndexError(f"doc_idx {doc_idx} di luar rentang [0, {self.n_docs})")
+        d = pd.read_parquet(
+            self.index_dir / f"docvec_{field}.parquet",
+            filters=[("doc", "==", doc_idx)],
+        )
+        if len(d) == 0:
+            return {}
+        d = d.sort_values("w", ascending=False)
         if top is not None:
-            order = order[:top]
-        return {self.terms[int(row.indices[j])]: float(row.data[j]) for j in order}
+            d = d.iloc[:top]
+        return {self.terms[int(t)]: float(w) for t, w in zip(d["term"], d["w"])}
 
     def top_candidates(self, query, fields=None, weights=None, top_n=1000, candidates=None):
         """Top-N dokumen (doc_idx, skor) urut skor menurun; dokumen berskor 0 tidak disertakan."""
@@ -142,22 +189,22 @@ class VSMSearcher:
         return self._top(total, top_n)
 
     def search(self, query, fields=None, weights=None, top_k=10, candidates=None):
-        """Pencarian lengkap -> list[SearchResult].
-
-        query  : str (dicari di semua `fields` terpilih) ATAU dict {field: teks} untuk
-                 pencarian multi-field dengan query berbeda per field,
-                 mis. {"title": "graph neural network", "abstract": "molecule"}.
-        fields : daftar field yang dipakai bila query berupa str (default: semua field).
-        weights: dict bobot per field (opsional; default di config.DEFAULT_FIELD_WEIGHTS).
-        """
+        """Pencarian lengkap -> list[SearchResult]."""
         total, per_field = self.score_all(query, fields, weights, candidates)
         idx, scores = self._top(total, top_k)
         out = []
         for rank, (i, s) in enumerate(zip(idx, scores), start=1):
             row = self.meta.iloc[int(i)]
-            out.append(SearchResult(
-                rank=rank, doc_idx=int(i), id=row["id"], title=row["title"], score=float(s),
-                field_scores={f: float(per_field[f][i]) for f in per_field}))
+            out.append(
+                SearchResult(
+                    rank=rank,
+                    doc_idx=int(i),
+                    id=row["id"],
+                    title=row["title"],
+                    score=float(s),
+                    field_scores={f: float(per_field[f][i]) for f in per_field},
+                )
+            )
         return out
 
     def _load_dataset(self) -> pd.DataFrame:
@@ -219,22 +266,25 @@ class VSMSearcher:
 
     @staticmethod
     def _top(scores: np.ndarray, k):
+        if k is not None and k <= 0:
+            return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32)
         nz = np.flatnonzero(scores > 0)
         if len(nz) == 0:
             return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.float32)
         if k is not None and len(nz) > k:
             nz = nz[np.argpartition(-scores[nz], k - 1)[:k]]
-        order = np.lexsort((nz, -scores[nz]))  # skor menurun, tie-break indeks naik
+        order = np.lexsort((nz, -scores[nz]))
         nz = nz[order]
         return nz, scores[nz]
 
 
 # ===== CLI =====
 def main():
+    all_fields = FIELDS + OPTIONAL_FIELDS
     ap = argparse.ArgumentParser(description="Cari artikel dengan VSM (TF-IDF) atau BM25F")
     ap.add_argument("query", nargs="?", default=None, help="query untuk semua field terpilih")
-    ap.add_argument("--fields", nargs="*", default=None, help="field yang dipakai (title abstract)")
-    for f in ("title", "abstract"):
+    ap.add_argument("--fields", nargs="*", default=None, help="field yang dipakai (mis. title abstract)")
+    for f in all_fields:
         ap.add_argument(f"--{f}", default=None, help=f"query khusus field {f}")
     ap.add_argument("--top", type=int, default=10)
     ap.add_argument("--bm25", action="store_true", help="rerank kandidat VSM dengan BM25F")
@@ -243,10 +293,10 @@ def main():
     ap.add_argument("--index", default=None, help="folder indeks (default: data/index/vsm)")
     args = ap.parse_args()
 
-    per_field = {f: getattr(args, f) for f in ("title", "abstract") if getattr(args, f)}
+    per_field = {f: getattr(args, f) for f in all_fields if getattr(args, f)}
     query = per_field if per_field else args.query
     if not query:
-        ap.error("isi query atau salah satu --title/--abstract")
+        ap.error("isi query atau salah satu argumen field (--title/--abstract/...)")
 
     s = VSMSearcher(args.index) if args.index else VSMSearcher()
     t = time.perf_counter()

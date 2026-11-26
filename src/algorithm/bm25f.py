@@ -1,8 +1,8 @@
 """Okapi BM25F: BM25 dengan bobot dan normalisasi panjang per field.
 
 Dokumen dapat berupa string (satu field ``body``) atau dict ``{field: teks}``.
-Tokenizer dapat diganti, mis. ``analyze_text`` dari modul VSM, agar BM25 dan
-VSM memakai pra-pemrosesan yang sama.
+Mendukung tokenizer kustom (mis. ``analyze_text`` dari modul VSM) serta IDF / avgdl
+tingkat korpus untuk skenario re-ranking kandidat dari VSM.
 """
 
 import math
@@ -10,7 +10,14 @@ import re
 from collections import Counter, defaultdict
 
 # Bobot default: judul lebih informatif daripada abstrak.
-DEFAULT_FIELD_WEIGHTS = {"title": 3.0, "abstract": 1.0}
+DEFAULT_FIELD_WEIGHTS = {
+    "title": 3.0,
+    "keywords": 2.0,
+    "abstract": 1.0,
+    "metode": 1.0,
+    "evaluasi": 1.0,
+    "kesimpulan": 1.0,
+}
 SINGLE_FIELD = "body"
 
 
@@ -25,11 +32,22 @@ class BM25F:
     ``corpus_idf`` dan ``field_avgdl`` opsional untuk memakai statistik korpus
     penuh saat hanya sebagian dokumen (kandidat) yang diberikan. Jika
     ``corpus_idf`` diisi, ia menggantikan IDF lokal; term yang tidak ada di
-    dalamnya tidak diberi skor.
+    dalamnya tidak diberi skor. ``fallback_missing_idf=True`` memakai IDF lokal
+    untuk term yang tidak ada di ``corpus_idf`` (berguna untuk field tambahan
+    yang belum punya df korpus).
     """
 
-    def __init__(self, documents, k1=1.2, b=0.75, field_weights=None, tokenizer=None,
-                 corpus_idf=None, field_avgdl=None):
+    def __init__(
+        self,
+        documents,
+        k1=1.2,
+        b=0.75,
+        field_weights=None,
+        tokenizer=None,
+        corpus_idf=None,
+        field_avgdl=None,
+        fallback_missing_idf=False,
+    ):
         self.documents = documents
         self.k1 = k1
         self.b = b
@@ -57,15 +75,18 @@ class BM25F:
         self.field_doc_length = {
             f: [len(tokens) for tokens in self.tokenized_docs[f]] for f in self.fields
         }
-        self.field_avgdl = {
+
+        computed_avgdl = {
             f: (sum(lengths) / self.N) if self.N > 0 else 0.0
             for f, lengths in self.field_doc_length.items()
         }
         # Statistik korpus penuh menggantikan rata-rata lokal kandidat.
         if field_avgdl is not None:
             self.field_avgdl = {
-                f: float(field_avgdl.get(f, self.field_avgdl[f])) for f in self.fields
+                f: float(field_avgdl.get(f, computed_avgdl[f])) for f in self.fields
             }
+        else:
+            self.field_avgdl = computed_avgdl
 
         # Normalisasi panjang BM25 per field.
         self.doc_norm = {
@@ -104,12 +125,22 @@ class BM25F:
 
         # df dihitung per dokumen, bukan per field.
         self.doc_freq = Counter({term: len(postings) for term, postings in self.index.items()})
-        self.idf = {
+        local_idf = {
             term: math.log((self.N - df + 0.5) / (df + 0.5) + 1)
             for term, df in self.doc_freq.items()
         }
-        # IDF korpus penuh menggantikan IDF lokal kandidat.
-        if corpus_idf is not None:
+        if corpus_idf is None:
+            self.idf = local_idf
+        elif fallback_missing_idf:
+            # Field tambahan (mis. struktur) mungkin belum punya df korpus;
+            # term yang tidak ada di corpus_idf memakai IDF lokal kandidat.
+            self.idf = {
+                term: float(corpus_idf.get(term, local_idf[term]))
+                for term in self.doc_freq
+            }
+        else:
+            # IDF korpus penuh menggantikan IDF lokal kandidat. Term yang tidak
+            # ada di corpus_idf tidak diberi skor.
             self.idf = {term: float(value) for term, value in corpus_idf.items()}
 
     @staticmethod
@@ -165,12 +196,13 @@ class BM25F:
 
         return total_score
 
-    def search(self, query, top_k=None):
+    def search(self, query, top_k=None, candidates=None):
         """Kembalikan [(doc_id, skor)] terurut menurun; skor 0 tidak disertakan."""
         query_tokens = self._tokenize(query)
         scores = defaultdict(float)
 
-        # Traversal inverted index: hanya hitung dokumen yang memuat term query.
+        candidates_set = set(int(c) for c in candidates) if candidates is not None else None
+
         for term in query_tokens:
             postings = self.index.get(term)
             if not postings:
@@ -180,6 +212,8 @@ class BM25F:
             if term_idf is None:
                 continue
             for doc_id, field_tfs in postings.items():
+                if candidates_set is not None and doc_id not in candidates_set:
+                    continue
                 scores[doc_id] += self._term_score(term_idf, doc_id, field_tfs)
 
         results = sorted(
@@ -189,6 +223,43 @@ class BM25F:
         if top_k is not None:
             return results[:top_k] if top_k > 0 else []
         return results
+
+    @classmethod
+    def rerank(
+        cls,
+        query: str,
+        candidate_docs: list[tuple[int, dict]] | dict[int, dict],
+        k1: float = 1.2,
+        b: float | dict = 0.75,
+        field_weights: dict | None = None,
+        tokenizer=None,
+        corpus_idf: dict[str, float] | None = None,
+        field_avgdl: dict[str, float] | None = None,
+        fallback_missing_idf: bool = False,
+        top_k: int | None = None,
+    ) -> list[tuple[int, float]]:
+        """Re-rank dokumen kandidat [(doc_idx, doc_dict)] dengan BM25F dan kembalikan doc_idx asli."""
+        if isinstance(candidate_docs, dict):
+            items = list(candidate_docs.items())
+        else:
+            items = list(candidate_docs)
+        if not items:
+            return []
+
+        doc_ids = [int(doc_id) for doc_id, _ in items]
+        docs = [doc for _, doc in items]
+        model = cls(
+            docs,
+            k1=k1,
+            b=b,
+            field_weights=field_weights,
+            tokenizer=tokenizer,
+            corpus_idf=corpus_idf,
+            field_avgdl=field_avgdl,
+            fallback_missing_idf=fallback_missing_idf,
+        )
+        local_ranked = model.search(query, top_k=top_k)
+        return [(doc_ids[local_id], float(score)) for local_id, score in local_ranked]
 
 
 # Alias lama agar pemakaian BM25 satu field tetap berjalan.

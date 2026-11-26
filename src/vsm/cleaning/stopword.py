@@ -1,16 +1,19 @@
 import argparse
+from pathlib import Path
 
 import pandas as pd
 
-from ..tfidf import ROOT_DIR, STOPWORDS
+from ..tfidf import STOPWORDS, VSM_DATA_DIR
 
-INPUT = ROOT_DIR / "frek_bersih.csv"
-OUTPUT = ROOT_DIR / "frek_stopword.csv"
+INPUT = VSM_DATA_DIR / "frek_bersih.csv"
+OUTPUT = VSM_DATA_DIR / "frek_stopword.csv"
 
 
-# Menghilangkan stopword (daftar STOPWORDS di tfidf.py)
 def hapus_stopword(df: pd.DataFrame) -> pd.DataFrame:
-    return df[~df["word"].isin(STOPWORDS)]
+    """Hilangkan stopword (daftar STOPWORDS di tfidf.py)."""
+    if len(df) == 0:
+        return df
+    return df[~df["word"].isin(STOPWORDS)].reset_index(drop=True)
 
 
 def main():
@@ -21,6 +24,7 @@ def main():
 
     df = pd.read_csv(args.input, dtype={"word": str}, keep_default_na=False)
     out = hapus_stopword(df)
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     out.to_csv(args.output, index=False)
     print(f"stopword dibuang: {len(df):,} -> {len(out):,} | {args.output}")
 
