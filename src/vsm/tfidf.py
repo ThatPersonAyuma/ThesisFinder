@@ -17,7 +17,7 @@ DEFAULT_FIELD_WEIGHTS = {
     "abstract": 1.0,
 }
 
-INDEX_FORMAT_VERSION = 1
+INDEX_FORMAT_VERSION = 2
 
 
 #  2. PRA-PEMROSESAN TEKS
@@ -63,7 +63,7 @@ def light_stem(token: str) -> str:
         return token[:-1]
     return token
 
-
+    
 def tokenize(text: str) -> list[str]:
     if not text:
         return []

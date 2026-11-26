@@ -1,6 +1,8 @@
 """Okapi BM25F: BM25 dengan bobot dan normalisasi panjang per field.
 
 Dokumen dapat berupa string (satu field ``body``) atau dict ``{field: teks}``.
+Tokenizer dapat diganti, mis. ``analyze_text`` dari modul VSM, agar BM25 dan
+VSM memakai pra-pemrosesan yang sama.
 """
 
 import math
@@ -17,13 +19,21 @@ class BM25F:
 
     ``documents`` berupa string (field ``body``) atau dict ``{field: teks}``.
     ``k1`` mengatur saturasi tf, ``b`` normalisasi panjang (boleh per field),
-    dan ``field_weights`` bobot field (default: title 3.0, abstract 1.0).
+    ``field_weights`` bobot field (default: title 3.0, abstract 1.0), dan
+    ``tokenizer`` fungsi teks -> list token (default: regex ``\\w+``).
+
+    ``corpus_idf`` dan ``field_avgdl`` opsional untuk memakai statistik korpus
+    penuh saat hanya sebagian dokumen (kandidat) yang diberikan. Jika
+    ``corpus_idf`` diisi, ia menggantikan IDF lokal; term yang tidak ada di
+    dalamnya tidak diberi skor.
     """
 
-    def __init__(self, documents, k1=1.2, b=0.75, field_weights=None):
+    def __init__(self, documents, k1=1.2, b=0.75, field_weights=None, tokenizer=None,
+                 corpus_idf=None, field_avgdl=None):
         self.documents = documents
         self.k1 = k1
         self.b = b
+        self._tokenizer = tokenizer
         self.N = len(documents)
         self.fields = self._detect_fields(documents)
 
@@ -51,6 +61,11 @@ class BM25F:
             f: (sum(lengths) / self.N) if self.N > 0 else 0.0
             for f, lengths in self.field_doc_length.items()
         }
+        # Statistik korpus penuh menggantikan rata-rata lokal kandidat.
+        if field_avgdl is not None:
+            self.field_avgdl = {
+                f: float(field_avgdl.get(f, self.field_avgdl[f])) for f in self.fields
+            }
 
         # Normalisasi panjang BM25 per field.
         self.doc_norm = {
@@ -78,7 +93,7 @@ class BM25F:
             sum(self.field_doc_length[f][i] for f in self.fields)
             for i in range(self.N)
         ]
-        self.avgdl = (sum(self.doc_length) / self.N) if self.N > 0 else 0.0
+        self.avgdl = sum(self.field_avgdl.values())
 
         # Inverted index: term -> {doc_id: {field: tf}}.
         self.index = defaultdict(dict)
@@ -93,6 +108,9 @@ class BM25F:
             term: math.log((self.N - df + 0.5) / (df + 0.5) + 1)
             for term, df in self.doc_freq.items()
         }
+        # IDF korpus penuh menggantikan IDF lokal kandidat.
+        if corpus_idf is not None:
+            self.idf = {term: float(value) for term, value in corpus_idf.items()}
 
     @staticmethod
     def _detect_fields(documents):
@@ -113,6 +131,8 @@ class BM25F:
         return [SINGLE_FIELD]
 
     def _tokenize(self, text):
+        if self._tokenizer is not None:
+            return self._tokenizer(text)
         return re.findall(r"\w+", text.lower())
 
     def _weighted_tf(self, doc_id, field_tfs):
@@ -139,8 +159,9 @@ class BM25F:
             if not postings:
                 continue
             field_tfs = postings.get(doc_id)
-            if field_tfs:
-                total_score += self._term_score(self.idf[term], doc_id, field_tfs)
+            term_idf = self.idf.get(term)
+            if field_tfs and term_idf is not None:
+                total_score += self._term_score(term_idf, doc_id, field_tfs)
 
         return total_score
 
@@ -155,17 +176,18 @@ class BM25F:
             if not postings:
                 continue
 
-            term_idf = self.idf[term]
+            term_idf = self.idf.get(term)
+            if term_idf is None:
+                continue
             for doc_id, field_tfs in postings.items():
                 scores[doc_id] += self._term_score(term_idf, doc_id, field_tfs)
 
         results = sorted(
             ((doc_id, score) for doc_id, score in scores.items() if score > 0),
-            key=lambda x: x[1],
-            reverse=True,
+            key=lambda x: (-x[1], x[0]),  # skor menurun, tie-break doc_id naik
         )
         if top_k is not None:
-            return results[:top_k]
+            return results[:top_k] if top_k > 0 else []
         return results
 
 
