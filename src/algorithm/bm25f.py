@@ -1,6 +1,8 @@
 """Okapi BM25F: BM25 dengan bobot dan normalisasi panjang per field.
 
 Dokumen dapat berupa string (satu field ``body``) atau dict ``{field: teks}``.
+Tokenizer dapat diganti, mis. ``analyze_text`` dari modul VSM, agar BM25 dan
+VSM memakai pra-pemrosesan yang sama.
 """
 
 import math
@@ -17,13 +19,15 @@ class BM25F:
 
     ``documents`` berupa string (field ``body``) atau dict ``{field: teks}``.
     ``k1`` mengatur saturasi tf, ``b`` normalisasi panjang (boleh per field),
-    dan ``field_weights`` bobot field (default: title 3.0, abstract 1.0).
+    ``field_weights`` bobot field (default: title 3.0, abstract 1.0), dan
+    ``tokenizer`` fungsi teks -> list token (default: regex ``\\w+``).
     """
 
-    def __init__(self, documents, k1=1.2, b=0.75, field_weights=None):
+    def __init__(self, documents, k1=1.2, b=0.75, field_weights=None, tokenizer=None):
         self.documents = documents
         self.k1 = k1
         self.b = b
+        self._tokenizer = tokenizer
         self.N = len(documents)
         self.fields = self._detect_fields(documents)
 
@@ -113,6 +117,8 @@ class BM25F:
         return [SINGLE_FIELD]
 
     def _tokenize(self, text):
+        if self._tokenizer is not None:
+            return self._tokenizer(text)
         return re.findall(r"\w+", text.lower())
 
     def _weighted_tf(self, doc_id, field_tfs):

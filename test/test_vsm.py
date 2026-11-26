@@ -76,7 +76,9 @@ class TestSearch(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         build_index([make_df()], cls.tmp.name, verbose=False)
-        cls.s = VSMSearcher(cls.tmp.name)
+        cls.dataset_path = os.path.join(cls.tmp.name, "papers.parquet")
+        make_df().to_parquet(cls.dataset_path, index=False)
+        cls.s = VSMSearcher(cls.tmp.name, dataset_path=cls.dataset_path)
 
     @classmethod
     def tearDownClass(cls):
@@ -95,6 +97,17 @@ class TestSearch(unittest.TestCase):
         self.assertEqual(r[0].doc_idx, 0)
         self.assertEqual(r[0].id, DOCS[0][0])
         self.assertTrue(all(0 < x.score <= 1.0001 for x in r))
+
+    def test_bm25_rerank(self):
+        r = self.s.search_bm25("graph neural network", top_k=3)
+        self.assertEqual(r[0].doc_idx, 0)
+        self.assertEqual(r[0].id, DOCS[0][0])
+        self.assertTrue(all(x.score > 0 for x in r))
+
+    def test_bm25_uses_vsm_analyzer(self):
+        # "networks" hanya cocok dengan "network" jika BM25 memakai analyze_text VSM.
+        r = self.s.search_bm25("networks", top_k=3)
+        self.assertEqual(r[0].doc_idx, 0)
 
     def test_field_selection(self):
         r = self.s.search("molecular", fields=["abstract"])
