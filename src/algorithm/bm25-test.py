@@ -109,6 +109,16 @@ class TestBM25SearchProperties(unittest.TestCase):
             results = self.bm.search(query, top_k=k)
             self.assertLessEqual(len(results), k)
 
+    def test_non_positive_top_k_returns_empty(self):
+        """top_k <= 0 tidak boleh mengembalikan sebagian hasil."""
+        for k in (0, -1):
+            self.assertEqual(self.bm.search("learning", top_k=k), [])
+
+    def test_ties_break_by_doc_id(self):
+        """Dokumen dengan skor sama diurutkan menurut doc_id naik."""
+        bm = BM25(["gamma", "gamma", "beta", "gamma", "gamma", "alpha"])
+        self.assertEqual([doc_id for doc_id, _ in bm.search("alpha beta")], [2, 5])
+
     def test_unmatched_document_returns_zero(self):
         """Memverifikasi bahwa dokumen yang tidak mengandung kata kunci query menghasilkan skor 0.0."""
         # Doc 5 adalah tentang 'Quantum Cryptography', tidak ada kata 'image' atau 'vision'
@@ -190,6 +200,27 @@ class TestBM25FFields(unittest.TestCase):
     def test_bm25_alias_is_bm25f(self):
         """Nama lama BM25 tetap tersedia dan menunjuk ke implementasi BM25F."""
         self.assertIs(BM25, BM25F)
+
+    def test_corpus_stats_override_local_statistics(self):
+        """IDF dan avgdl korpus menggantikan statistik lokal kandidat."""
+        docs = [
+            {"title": "graph", "abstract": "graph"},
+            {"title": "other", "abstract": "text"},
+        ]
+        bm = BM25F(docs, corpus_idf={"graph": 2.0},
+                   field_avgdl={"title": 10.0, "abstract": 20.0})
+
+        self.assertEqual(bm.field_avgdl["title"], 10.0)
+        self.assertEqual(bm.field_avgdl["abstract"], 20.0)
+        self.assertEqual(bm.idf["graph"], 2.0)
+        self.assertEqual(bm.score("other", 1), 0.0)
+        self.assertEqual([doc_id for doc_id, _ in bm.search("graph")], [0])
+
+        tf_title = 3.0 / (1 - 0.75 + 0.75 * (1 / 10.0))
+        tf_abstract = 1.0 / (1 - 0.75 + 0.75 * (1 / 20.0))
+        tf = tf_title + tf_abstract
+        expected = 2.0 * (tf * (bm.k1 + 1)) / (tf + bm.k1)
+        self.assertAlmostEqual(bm.score("graph", 0), expected, places=6)
 
 
 class TestBM25QueryDataset(unittest.TestCase):

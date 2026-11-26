@@ -1,7 +1,9 @@
+import json
 import math
 import os
 import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -70,6 +72,22 @@ class TestIndexer(unittest.TestCase):
             with self.assertRaises(ValueError):
                 list(iter_papers(path))
 
+    def test_index_stores_bm25f_corpus_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            build_index([make_df()], tmp, verbose=False)
+            config = json.loads((Path(tmp) / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(config["format_version"], 2)
+            self.assertAlmostEqual(config["avgdl"]["title"], 3.5)
+            self.assertAlmostEqual(config["avgdl"]["abstract"], 6.5)
+
+            vocab = json.loads((Path(tmp) / "vocab.json").read_text(encoding="utf-8"))
+            df_global = np.load(Path(tmp) / "df_global.npy")
+            self.assertEqual(len(df_global), len(vocab))
+            tid = {term: i for i, term in enumerate(vocab)}
+            self.assertEqual(int(df_global[tid["graph"]]), 2)
+            self.assertEqual(int(df_global[tid["network"]]), 2)
+            self.assertEqual(int(df_global[tid["neural"]]), 1)
+
 
 class TestSearch(unittest.TestCase):
     @classmethod
@@ -108,6 +126,32 @@ class TestSearch(unittest.TestCase):
         # "networks" hanya cocok dengan "network" jika BM25 memakai analyze_text VSM.
         r = self.s.search_bm25("networks", top_k=3)
         self.assertEqual(r[0].doc_idx, 0)
+
+    def test_bm25_uses_corpus_statistics(self):
+        # Skor dokumen yang sama harus stabil saat jumlah kandidat berubah.
+        small = {r.doc_idx: r.score for r in self.s.search_bm25("graph learning", top_k=2, candidate_k=2)}
+        large = {r.doc_idx: r.score for r in self.s.search_bm25("graph learning", top_k=2, candidate_k=3)}
+        common = set(small) & set(large)
+        self.assertTrue(common)
+        for doc_idx in common:
+            self.assertAlmostEqual(small[doc_idx], large[doc_idx], places=6)
+
+    def test_bm25_falls_back_without_corpus_stats(self):
+        # Indeks lama tanpa df_global/avgdl tetap bisa rerank dengan statistik kandidat.
+        with tempfile.TemporaryDirectory() as tmp:
+            build_index([make_df()], tmp, verbose=False)
+            os.remove(os.path.join(tmp, "df_global.npy"))
+            config_path = Path(tmp) / "config.json"
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config.pop("avgdl", None)
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            dataset_path = os.path.join(tmp, "papers.parquet")
+            make_df().to_parquet(dataset_path, index=False)
+            s = VSMSearcher(tmp, dataset_path=dataset_path)
+            self.assertIsNone(s.df_global)
+            self.assertIsNone(s.bm25_avgdl)
+            r = s.search_bm25("graph neural network", top_k=3)
+            self.assertEqual(r[0].doc_idx, 0)
 
     def test_field_selection(self):
         r = self.s.search("molecular", fields=["abstract"])

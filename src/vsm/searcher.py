@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -41,6 +42,12 @@ class VSMSearcher:
         self.matrix = {f: self._load_docvec(f).tocsc() for f in self.fields}
         self.idf = {f: np.load(index_dir / f"idf_{f}.npy") for f in self.fields}
         self.meta = pd.read_parquet(index_dir / "meta.parquet")
+        # Statistik korpus untuk BM25F; indeks lama mungkin belum punya.
+        df_global_path = index_dir / "df_global.npy"
+        self.df_global = np.load(df_global_path) if df_global_path.exists() else None
+        if self.df_global is not None and len(self.df_global) != len(self.terms):
+            self.df_global = None
+        self.bm25_avgdl = self.config.get("avgdl") or None
         self.dataset_path = Path(dataset_path)
         self._dataset = None
 
@@ -159,12 +166,26 @@ class VSMSearcher:
             self._dataset = pd.read_parquet(self.dataset_path, columns=["title", "abstract"])
         return self._dataset
 
+    def _corpus_idf(self, text):
+        """IDF BM25F dari df seluruh korpus; None jika indeks lama belum punya df_global."""
+        if self.df_global is None:
+            return None
+        idf = {}
+        for term in set(analyze_text(text)):
+            tid = self.vocab.get(term)
+            if tid is None:
+                continue
+            df = min(max(int(self.df_global[tid]), 0), self.n_docs)
+            idf[term] = math.log((self.n_docs - df + 0.5) / (df + 0.5) + 1)
+        return idf
+
     def search_bm25(self, query, top_k=10, candidate_k=100, candidates=None):
         """VSM mengambil `candidate_k` kandidat, lalu BM25F mengurutkan ulang.
 
         Query dict {field: teks} digabung karena BM25F memakai satu query untuk
-        semua field. IDF dan avgdl BM25 dihitung dari kandidat, bukan seluruh
-        korpus. Hasil memakai doc_idx yang sama dengan indeks VSM.
+        semua field. IDF dan avgdl memakai statistik korpus dari indeks; jika
+        indeks lama belum menyimpannya, fallback ke statistik kandidat. Hasil
+        memakai doc_idx yang sama dengan indeks VSM.
         """
         text = " ".join(str(q) for q in query.values() if q) if isinstance(query, dict) else query
         if not text or not str(text).strip() or (top_k is not None and top_k <= 0):
@@ -185,7 +206,9 @@ class VSMSearcher:
                 "abstract": "" if pd.isna(row["abstract"]) else str(row["abstract"]),
             })
 
-        model = BM25F(docs, tokenizer=analyze_text)
+        model = BM25F(docs, tokenizer=analyze_text,
+                      corpus_idf=self._corpus_idf(text),
+                      field_avgdl=self.bm25_avgdl)
         out = []
         for rank, (local_id, score) in enumerate(model.search(text, top_k=top_k), start=1):
             i = int(cand_idx[local_id])
