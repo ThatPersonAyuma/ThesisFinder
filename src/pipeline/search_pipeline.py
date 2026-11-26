@@ -196,6 +196,7 @@ class SearchPipeline:
                 field_weights=bm25f_weights,
                 tokenizer=analyze_text,
                 corpus_idf=corpus_idf,
+                fallback_missing_idf=True,
                 top_k=pool_k if has_post_filters else top_k,
             )
             for doc_idx, bm_score in bm25_ranked:
@@ -232,6 +233,7 @@ class SearchPipeline:
                     field_weights=bm25f_weights,
                     tokenizer=analyze_text,
                     corpus_idf=corpus_idf,
+                    fallback_missing_idf=True,
                 )
                 bm_scores = {doc_idx: score for doc_idx, score in bm25_ranked}
                 max_bm = max(bm_scores.values(), default=0.0)
