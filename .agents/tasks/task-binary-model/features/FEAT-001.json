@@ -1,0 +1,27 @@
+{
+  "id": "FEAT-001",
+  "type": "feat",
+  "description": "Create src/binary/ module with config, indexer, and filter components. Build inverted indexes (parquet files) for year, primary_category, authors, and categories fields. Authors and categories are stored as numpy arrays in the dataset (not string lists), so iterate directly over array elements. Skip null values for year and primary_category (73,966 nulls each). Implement BinaryFilter class with pre-filter methods (year range, primary_category OR logic returning np.array of doc indices) and post-filter methods (authors and categories exact matching with case-insensitive comparison, filtering existing doc_ids).",
+  "status": "completed",
+  "steps": [
+    "Create src/binary/config.py with constants: BINARY_INDEX_DIR = Path('e:/ThesisFinder/data/index/binary'), DATASET_PATH = Path('e:/ThesisFinder/data/completed.parquet'), field names for year, primary_category, authors, categories",
+    "Create src/binary/indexer.py following the pattern in src/vsm/indexer.py. Build 4 inverted indexes: year.parquet (key=year_value, doc_idx=row_index), primary_category.parquet, authors.parquet (one entry per author per paper, lowercase normalized), categories.parquet. Authors and categories fields are numpy arrays - iterate elements directly, no ast.literal_eval needed. Skip rows where year or primary_category is null. Save each as parquet with columns [key, doc_idx]. Save config.json with total_docs, field stats (unique keys, non-null docs), timestamp. Add CLI: python -m src.binary.indexer",
+    "Create src/binary/filter.py with BinaryFilter class. Load all 4 parquet indexes in __init__. Implement filter_by_year(year_min, year_max) returning np.array of doc indices within range. Implement filter_by_primary_category(categories: list) with OR logic (union). Implement get_pre_filter_candidates(year_range=None, primary_categories=None) combining filters with AND (intersection). Implement filter_by_authors(doc_ids, authors: list) and filter_by_categories(doc_ids, categories: list) for post-filtering - both use case-insensitive exact match with ANY logic. Implement apply_post_filters(doc_ids, authors=None, categories=None). Load full dataset parquet to access raw metadata for post-filtering.",
+    "Create src/binary/__init__.py exporting BinaryFilter and BinaryIndexer classes"
+  ],
+  "acceptance_criteria": [
+    "python -m src.binary.indexer runs successfully and creates e:/ThesisFinder/data/index/binary/ with year.parquet, primary_category.parquet, authors.parquet, categories.parquet, and config.json",
+    "Each parquet file has columns [key, doc_idx] and contains expected number of entries (verify authors has multiple entries per multi-author paper)",
+    "BinaryFilter can be instantiated and load indexes without errors",
+    "get_pre_filter_candidates() with year_range=(2020, 2022) and primary_categories=['cs.AI', 'cs.LG'] returns intersection of matching doc indices as np.array",
+    "Post-filter methods correctly filter case-insensitive with ANY logic"
+  ],
+  "verification": [
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m src.binary.indexer",
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -c \"from src.binary import BinaryFilter; bf = BinaryFilter(); print('Loaded indexes:', bf); candidates = bf.get_pre_filter_candidates(year_range=(2020, 2022)); print(f'Pre-filter returned {len(candidates)} candidates')\"",
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest test/test_binary_model.py::TestBinaryIndexer -v",
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest test/test_binary_model.py::TestBinaryFilter -v"
+  ],
+  "blocked_reason": null,
+  "findings": "Successfully implemented binary model indexer and filter. All 4 indexes (year, primary_category, authors, categories) created successfully. Year index: 11 unique years covering 306,913 docs. Primary category: 4 unique categories. Authors: 462,877 unique authors with 1,752,347 total entries (multi-author papers correctly indexed). Categories: 149 unique categories with 874,299 entries. BinaryFilter successfully instantiates and filters work correctly with case-insensitive matching for authors/categories. All tests passing."
+}

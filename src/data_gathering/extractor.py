@@ -1,9 +1,12 @@
-# importing required classes
 from io import BytesIO
+from os import listdir
 
 from pypdf import PdfReader
-from downloader import PDF_DOWNLOAD_FOLDER
-from os import listdir
+
+try:
+    from .downloader import PDF_DOWNLOAD_FOLDER
+except ImportError:
+    from downloader import PDF_DOWNLOAD_FOLDER
 
 def extract_keywords(file_path: str, only_first_page: bool = True)->str:
     # creating a pdf reader object

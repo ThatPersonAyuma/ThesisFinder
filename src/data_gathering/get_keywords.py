@@ -4,8 +4,12 @@ import pandas as pd
 import numpy as np
 from playwright.sync_api import sync_playwright
 
-from downloader import PDF_DOWNLOAD_FOLDER
-from extractor import extract_keywords_from_bytes
+try:
+    from .downloader import PDF_DOWNLOAD_FOLDER
+    from .extractor import extract_keywords_from_bytes
+except ImportError:
+    from downloader import PDF_DOWNLOAD_FOLDER
+    from extractor import extract_keywords_from_bytes
 
 SAVE_PATH = 'data/papers_2015_2025_keywords.parquet'
 KEYWORDS_COL_NAME='keywords'

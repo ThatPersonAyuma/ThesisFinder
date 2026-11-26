@@ -1,0 +1,24 @@
+{
+  "id": "FEAT-002",
+  "type": "feat",
+  "description": "Add optional candidates parameter to BM25F.search() method for backward-compatible filtering. When candidates is provided (list/array of doc indices), only score those documents. Implementation must follow the pattern: check if candidates is None, if not, filter the inverted index traversal or post-filter results to only include candidate docs.",
+  "status": "completed",
+  "steps": [
+    "Read src/algorithm/bm25f.py and understand the search() method's current implementation which traverses inverted index and builds scores dict",
+    "Add candidates=None parameter to search(query, top_k=None, candidates=None) method signature",
+    "Implement filtering logic: if candidates is not None, convert to set for O(1) lookup, then in the scoring loop only accumulate scores for doc_id in candidates set. Alternative: post-filter the results list before sorting",
+    "Ensure backward compatibility: existing calls without candidates parameter still work identically",
+    "Add docstring explaining candidates parameter behavior"
+  ],
+  "acceptance_criteria": [
+    "BM25F.search(query) without candidates parameter works exactly as before (backward compatible)",
+    "BM25F.search(query, candidates=[0, 5, 10]) only returns results for those 3 doc indices",
+    "BM25F.search(query, candidates=np.array([...])) works with numpy arrays",
+    "Performance: filtering with candidates does not significantly slow down search (< 10% overhead)"
+  ],
+  "verification": [
+    "C:\\Users\\USER\\AppData\\Local\\Programs\\Python\\Python312\\python.exe -m pytest test/test_binary_model.py::TestBM25FWithCandidates -v"
+  ],
+  "blocked_reason": null,
+  "findings": "Successfully implemented optional candidates parameter to BM25F.search() method. Implementation uses set-based filtering during inverted index traversal for O(1) lookup performance. Backward compatible - existing calls without candidates parameter work identically. Supports both list and numpy array inputs. All 7 test cases passing including: backward compatibility, list/numpy array candidates, empty candidates, correct filtering, combination with top_k, and performance overhead < 10%. Implementation adds 3 lines of filtering logic (candidates_set conversion and doc_id membership check) with minimal overhead."
+}
